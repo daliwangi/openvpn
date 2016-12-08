@@ -376,7 +376,7 @@ openvpn_getaddrinfo (unsigned int flags,
        */
       while (true)
         {
-#ifndef WIN32
+#ifndef _WIN32
 	  res_init ();
 #endif
           /* try hostname lookup */
@@ -690,7 +690,7 @@ socket_set_buffers (int fd, const struct socket_buffer_size *sbs)
 static bool
 socket_set_tcp_nodelay (int sd, int state)
 {
-#if defined(WIN32) || (defined(HAVE_SETSOCKOPT) && defined(IPPROTO_TCP) && defined(TCP_NODELAY))
+#if defined(_WIN32) || (defined(HAVE_SETSOCKOPT) && defined(IPPROTO_TCP) && defined(TCP_NODELAY))
   if (setsockopt (sd, IPPROTO_TCP, TCP_NODELAY, (void *) &state, sizeof (state)) != 0)
     {
       msg (M_WARN, "NOTE: setsockopt TCP_NODELAY=%d failed", state);
@@ -761,7 +761,7 @@ create_socket_tcp (struct addrinfo* addrinfo)
   if ((sd = socket (addrinfo->ai_family, addrinfo->ai_socktype, addrinfo->ai_protocol)) < 0)
     msg (M_ERR, "Cannot create TCP socket");
 
-#ifndef WIN32 /* using SO_REUSEADDR on Windows will cause bind to succeed on port conflicts! */
+#ifndef _WIN32 /* using SO_REUSEADDR on Windows will cause bind to succeed on port conflicts! */
   /* set SO_REUSEADDR on socket */
   {
     int on = 1;
@@ -770,6 +770,10 @@ create_socket_tcp (struct addrinfo* addrinfo)
       msg (M_ERR, "TCP: Cannot setsockopt SO_REUSEADDR on TCP socket");
   }
 #endif
+
+  /* set socket file descriptor to not pass across execs, so that
+     scripts don't have access to it */
+  set_cloexec (sd);
 
   return sd;
 }
@@ -815,6 +819,11 @@ create_socket_udp (struct addrinfo* addrinfo, const unsigned int flags)
         }
     }
 #endif
+
+  /* set socket file descriptor to not pass across execs, so that
+     scripts don't have access to it */
+  set_cloexec (sd);
+
   return sd;
 }
 
@@ -968,6 +977,12 @@ socket_do_accept (socket_descriptor_t sd,
       openvpn_close_socket (new_sd);
       new_sd = SOCKET_UNDEFINED;
     }
+  else
+    {
+      /* set socket file descriptor to not pass across execs, so that
+	 scripts don't have access to it */
+      set_cloexec (sd);
+    }
   return new_sd;
 }
 
@@ -1066,7 +1081,7 @@ socket_listen_accept (socket_descriptor_t sd,
 /* older mingw versions and WinXP do not have this define,
  * but Vista and up support the functionality - just define it here
  */
-#ifdef WIN32
+#ifdef _WIN32
 # ifndef IPV6_V6ONLY
 #  define IPV6_V6ONLY 27
 # endif
@@ -1141,7 +1156,7 @@ openvpn_connect (socket_descriptor_t sd,
   if (status)
     status = openvpn_errno ();
   if (
-#ifdef WIN32
+#ifdef _WIN32
     status == WSAEWOULDBLOCK
 #else
     status == EINPROGRESS
@@ -1184,7 +1199,7 @@ openvpn_connect (socket_descriptor_t sd,
 	    {
 	      if (--connect_timeout < 0)
 		{
-#ifdef WIN32
+#ifdef _WIN32
 		  status = WSAETIMEDOUT;
 #else
 		  status = ETIMEDOUT;
@@ -1296,7 +1311,7 @@ socket_connect (socket_descriptor_t* sd,
 static void
 socket_frame_init (const struct frame *frame, struct link_socket *sock)
 {
-#ifdef WIN32
+#ifdef _WIN32
   overlapped_io_init (&sock->reads, frame, FALSE, false);
   overlapped_io_init (&sock->writes, frame, TRUE, false);
   sock->rw_handle.read = sock->reads.overlapped.hEvent;
@@ -1305,7 +1320,7 @@ socket_frame_init (const struct frame *frame, struct link_socket *sock)
 
   if (link_socket_connection_oriented (sock))
     {
-#ifdef WIN32
+#ifdef _WIN32
       stream_buf_init (&sock->stream_buf,
 		       &sock->reads.buf_init,
 		       sock->sockflags,
@@ -1617,6 +1632,7 @@ link_socket_init_phase1 (struct link_socket *sock,
       ASSERT (sock->info.proto != PROTO_TCP_CLIENT);
       ASSERT (socket_defined (inetd_socket_descriptor));
       sock->sd = inetd_socket_descriptor;
+      set_cloexec (sock->sd);		/* not created by create_socket*() */
     }
   else if (mode != LS_MODE_TCP_ACCEPT_FROM)
     {
@@ -1676,13 +1692,6 @@ phase2_set_socket_flags (struct link_socket* sock)
 
   /* set socket to non-blocking mode */
   set_nonblock (sock->sd);
-
-  /* set socket file descriptor to not pass across execs, so that
-     scripts don't have access to it */
-  set_cloexec (sock->sd);
-
-  if (socket_defined (sock->ctrl_sd))
-    set_cloexec (sock->ctrl_sd);
 
   /* set Path MTU discovery options on the socket */
   set_mtu_discover_type (sock->sd, sock->mtu_discover_type, sock->info.af);
@@ -1857,8 +1866,9 @@ link_socket_init_phase2 (struct link_socket *sock,
   int sig_save = 0;
 
   ASSERT (sock);
+  ASSERT (sig_info);
 
-  if (sig_info && sig_info->signal_received)
+  if (sig_info->signal_received)
     {
       sig_save = sig_info->signal_received;
       sig_info->signal_received = 0;
@@ -1879,7 +1889,7 @@ link_socket_init_phase2 (struct link_socket *sock,
   if (sock->inetd)
     {
       phase2_inetd (sock, frame, remote_dynamic,  &sig_info->signal_received);
-      if (sig_info && sig_info->signal_received)
+      if (sig_info->signal_received)
 	goto done;
 
     }
@@ -1921,7 +1931,7 @@ link_socket_init_phase2 (struct link_socket *sock,
 	  goto done;
 	}
 
-      if (sig_info && sig_info->signal_received)
+      if (sig_info->signal_received)
 	goto done;
 
       if (sock->info.proto == PROTO_TCP_SERVER)
@@ -1942,7 +1952,7 @@ link_socket_init_phase2 (struct link_socket *sock,
       if (sock->sd != -1)
 	protect_fd_nonlocal (sock->sd, &sock->info.lsa->actual.dest.addr.sa);
 #endif
-      if (sig_info && sig_info->signal_received)
+      if (sig_info->signal_received)
 	goto done;
     }
 
@@ -1950,7 +1960,7 @@ link_socket_init_phase2 (struct link_socket *sock,
   linksock_print_addr(sock);
 
  done:
-  if (sig_save && sig_info)
+  if (sig_save)
     {
       if (!sig_info->signal_received)
 	sig_info->signal_received = sig_save;
@@ -1970,7 +1980,7 @@ link_socket_close (struct link_socket *sock)
 
       if (socket_defined (sock->sd))
 	{
-#ifdef WIN32
+#ifdef _WIN32
 	  close_net_event_win32 (&sock->listen_handle, sock->sd, 0);
 #endif
 	  if (!gremlin)
@@ -1980,7 +1990,7 @@ link_socket_close (struct link_socket *sock)
 		msg (M_WARN | M_ERRNO, "TCP/UDP: Close Socket failed");
 	    }
 	  sock->sd = SOCKET_UNDEFINED;
-#ifdef WIN32
+#ifdef _WIN32
 	  if (!gremlin)
 	    {
 	      overlapped_io_close (&sock->reads);
@@ -2022,9 +2032,10 @@ ipchange_fmt (const bool include_cmd, struct argv *argv, const struct link_socke
 {
   const char *host = print_sockaddr_ex (&info->lsa->actual.dest.addr.sa, " ", PS_SHOW_PORT , gc);
   if (include_cmd)
-    argv_printf (argv, "%sc %s",
-		 info->ipchange_command,
-		 host);
+    {
+      argv_parse_cmd (argv, info->ipchange_command);
+      argv_printf_cat (argv, "%s", host);
+    }
   else
     argv_printf (argv, "%s", host);
 
@@ -2174,7 +2185,7 @@ socket_stat (const struct link_socket *s, unsigned int rwflags, struct gc_arena 
 	{
 	  buf_printf (&out, "S%s",
 		      (s->rwflags_debug & EVENT_READ) ? "R" : "r");
-#ifdef WIN32
+#ifdef _WIN32
 	  buf_printf (&out, "%s",
 		      overlapped_io_state_ascii (&s->reads));
 #endif
@@ -2183,7 +2194,7 @@ socket_stat (const struct link_socket *s, unsigned int rwflags, struct gc_arena 
 	{
 	  buf_printf (&out, "S%s",
 		      (s->rwflags_debug & EVENT_WRITE) ? "W" : "w");
-#ifdef WIN32
+#ifdef _WIN32
 	  buf_printf (&out, "%s",
 		      overlapped_io_state_ascii (&s->writes));
 #endif
@@ -2358,7 +2369,7 @@ stream_buf_close (struct stream_buf* sb)
 event_t
 socket_listen_event_handle (struct link_socket *s)
 {
-#ifdef WIN32
+#ifdef _WIN32
   if (!defined_net_event_win32 (&s->listen_handle))
     init_net_event_win32 (&s->listen_handle, FD_ACCEPT, s->sd, 0);
   return &s->listen_handle;
@@ -2597,7 +2608,8 @@ setenv_sockaddr (struct env_set *es, const char *name_prefix, const struct openv
       if ( IN6_IS_ADDR_V4MAPPED( &addr->addr.in6.sin6_addr ))
 	{
 	  struct in_addr ia;
-	  ia.s_addr = *(in_addr_t *)&addr->addr.in6.sin6_addr.s6_addr[12] ;
+	  memcpy (&ia.s_addr, &addr->addr.in6.sin6_addr.s6_addr[12],
+	      sizeof (ia.s_addr));
 	  openvpn_snprintf (name_buf, sizeof (name_buf), "%s_ip", name_prefix);
 	  openvpn_snprintf (buf, sizeof(buf), "%s", inet_ntoa(ia) );
 	}
@@ -2834,7 +2846,7 @@ link_socket_read_tcp (struct link_socket *sock,
 
   if (!sock->stream_buf.residual_fully_formed)
     {
-#ifdef WIN32
+#ifdef _WIN32
       len = socket_finalize (sock->sd, &sock->reads, buf, NULL);
 #else
       struct buffer frag;
@@ -2859,7 +2871,7 @@ link_socket_read_tcp (struct link_socket *sock,
     return buf->len = 0; /* no error, but packet is still incomplete */
 }
 
-#ifndef WIN32
+#ifndef _WIN32
 
 #if ENABLE_IP_PKTINFO
 
@@ -2980,7 +2992,7 @@ link_socket_write_tcp (struct link_socket *sock,
   ASSERT (len <= sock->stream_buf.maxlen);
   len = htonps (len);
   ASSERT (buf_write_prepend (buf, &len, sizeof (len)));
-#ifdef WIN32
+#ifdef _WIN32
   return link_socket_write_win32 (sock, buf, to);
 #else
   return link_socket_write_tcp_posix (sock, buf, to);  
@@ -3068,7 +3080,7 @@ link_socket_write_udp_posix_sendmsg (struct link_socket *sock,
  * Win32 overlapped socket I/O functions.
  */
 
-#ifdef WIN32
+#ifdef _WIN32
 
 int
 socket_recv_queue (struct link_socket *sock, int maxsize)
@@ -3376,7 +3388,7 @@ socket_finalize (SOCKET s,
 	    case sizeof(struct sockaddr_in):
 	    case sizeof(struct sockaddr_in6):
 	    /* TODO(jjo): for some reason (?) I'm getting 24,28 for AF_INET6
-	     * under WIN32*/
+	     * under _WIN32*/
 	    case sizeof(struct sockaddr_in6)-4:
 	      break;
 	    default:
@@ -3402,7 +3414,7 @@ socket_finalize (SOCKET s,
   return ret;
 }
 
-#endif /* WIN32 */
+#endif /* _WIN32 */
 
 /*
  * Socket event notification
@@ -3423,7 +3435,7 @@ socket_set (struct link_socket *s,
 	  rwflags &= ~EVENT_READ;
 	}
       
-#ifdef WIN32
+#ifdef _WIN32
       if (rwflags & EVENT_READ)
 	socket_recv_queue (s, 0);
 #endif
@@ -3473,6 +3485,11 @@ create_socket_unix (void)
 
   if ((sd = socket (PF_UNIX, SOCK_STREAM, 0)) < 0)
     msg (M_ERR, "Cannot create unix domain socket");
+
+  /* set socket file descriptor to not pass across execs, so that
+     scripts don't have access to it */
+  set_cloexec (sd);
+
   return sd;
 }
 
@@ -3513,6 +3530,12 @@ socket_accept_unix (socket_descriptor_t sd,
 
   CLEAR (*remote);
   ret = accept (sd, (struct sockaddr *) remote, &remote_len);
+  if ( ret >= 0 )
+    {
+      /* set socket file descriptor to not pass across execs, so that
+	 scripts don't have access to it */
+      set_cloexec (ret);
+    }
   return ret;
 }
 

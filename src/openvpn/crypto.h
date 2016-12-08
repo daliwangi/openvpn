@@ -266,6 +266,9 @@ struct crypto_options
                                  *   security operation functions. */
 };
 
+#define CRYPT_ERROR(format) \
+  do { msg (D_CRYPT_ERRORS, "%s: " format, error_prefix); goto error_exit; } while (false)
+
 /**
  * Minimal IV length for AEAD mode ciphers (in bytes):
  * 4-byte packet id + 8 bytes implicit IV.
@@ -397,6 +400,21 @@ bool openvpn_decrypt (struct buffer *buf, struct buffer work,
 
 /** @} name Functions for performing security operations on data channel packets */
 
+/**
+ * Check packet ID for replay, and perform replay administration.
+ *
+ * @param opt	Crypto options for this packet, contains replay state.
+ * @param pin	Packet ID read from packet.
+ * @param error_prefix	Prefix to use when printing error messages.
+ * @param gc	Garbage collector to use.
+ *
+ * @return true if packet ID is validated to be not a replay, false otherwise.
+ */
+bool crypto_check_replay(struct crypto_options *opt,
+    const struct packet_id_net *pin, const char *error_prefix,
+    struct gc_arena *gc);
+
+
 /** Calculate crypto overhead and adjust frame to account for that */
 void crypto_adjust_frame_parameters(struct frame *frame,
 				    const struct key_type* kt,
@@ -465,12 +483,9 @@ void key2_print (const struct key2* k,
 		 const char* prefix0,
 		 const char* prefix1);
 
-#define GHK_INLINE  (1<<0)
-void get_tls_handshake_key (const struct key_type *key_type,
-			    struct key_ctx_bi *ctx,
-			    const char *passphrase_file,
-			    const int key_direction,
-			    const unsigned int flags);
+void crypto_read_openvpn_key (const struct key_type *key_type,
+	struct key_ctx_bi *ctx, const char *key_file, const char *key_inline,
+	const int key_direction, const char *key_name, const char *opt_name);
 
 /*
  * Inline functions

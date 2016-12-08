@@ -516,7 +516,8 @@ verify_cert_call_command(const char *verify_command, struct env_set *es,
        }
     }
 
-  argv_printf (&argv, "%sc %d %s", verify_command, cert_depth, subject);
+  argv_parse_cmd (&argv, verify_command);
+  argv_printf_cat (&argv, "%d %s", cert_depth, subject);
 
   argv_msg_prefix (D_TLS_DEBUG, &argv, "TLS: executing verify command");
   ret = openvpn_run_script (&argv, es, 0, "--tls-verify script");
@@ -671,15 +672,18 @@ verify_cert(struct tls_session *session, openvpn_x509_cert_t *cert, int cert_dep
   if (opt->crl_file)
     {
       if (opt->ssl_flags & SSLF_CRL_VERIFY_DIR)
-      {
-	if (SUCCESS != verify_check_crl_dir(opt->crl_file, cert))
-	  goto cleanup;
-      }
+	{
+	  if (SUCCESS != verify_check_crl_dir(opt->crl_file, cert))
+	    goto cleanup;
+	}
       else
-      {
-	if (SUCCESS != x509_verify_crl(opt->crl_file, opt->crl_file_inline, cert, subject))
-	  goto cleanup;
-      }
+	{
+	  if (tls_verify_crl_missing (opt))
+	    {
+	      msg (D_TLS_ERRORS, "VERIFY ERROR: CRL not loaded");
+	      goto cleanup;
+	    }
+	}
     }
 
   msg (D_HANDSHAKE, "VERIFY OK: depth=%d, %s", cert_depth, subject);
@@ -983,7 +987,8 @@ verify_user_pass_script (struct tls_session *session, const struct user_pass *up
       setenv_untrusted (session);
 
       /* format command line */
-      argv_printf (&argv, "%sc %s", session->opt->auth_user_pass_verify_script, tmp_file);
+      argv_parse_cmd (&argv, session->opt->auth_user_pass_verify_script);
+      argv_printf_cat (&argv, "%s", tmp_file);
 
       /* call command */
       ret = openvpn_run_script (&argv, session->opt->es, 0,
@@ -1171,7 +1176,7 @@ verify_user_pass(struct user_pass *up, struct tls_multi *multi,
       if (memcmp_constant_time(multi->auth_token, up->password,
                  strlen(multi->auth_token)) != 0)
         {
-          memset (multi->auth_token, 0, AUTH_TOKEN_SIZE);
+          secure_memzero (multi->auth_token, AUTH_TOKEN_SIZE);
           free (multi->auth_token);
           multi->auth_token = NULL;
           multi->auth_token_sent = false;
@@ -1257,7 +1262,7 @@ verify_user_pass(struct user_pass *up, struct tls_multi *multi,
                   "No auth-token will be activated now");
 	      if (multi->auth_token)
 		{
-		  memset (multi->auth_token, 0, AUTH_TOKEN_SIZE);
+		  secure_memzero (multi->auth_token, AUTH_TOKEN_SIZE);
 		  free (multi->auth_token);
 		  multi->auth_token = NULL;
 		}

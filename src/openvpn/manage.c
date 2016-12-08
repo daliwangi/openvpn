@@ -270,7 +270,7 @@ man_delete_unix_socket (struct management *man)
 static void
 man_close_socket (struct management *man, const socket_descriptor_t sd)
 {
-#ifndef WIN32
+#ifndef _WIN32
   /*
    * Windows doesn't need this because the ne32 event is permanently
    * enabled at struct management scope.
@@ -1413,7 +1413,7 @@ man_dispatch_command (struct management *man, struct status_output *so, const ch
   gc_free (&gc);
 }
 
-#ifdef WIN32
+#ifdef _WIN32
 
 static void
 man_start_ne32 (struct management *man)
@@ -1499,11 +1499,10 @@ man_new_connection_post (struct management *man, const char *description)
   struct gc_arena gc = gc_new ();
 
   set_nonblock (man->connection.sd_cli);
-  set_cloexec (man->connection.sd_cli);
 
   man_connection_settings_reset (man);
 
-#ifdef WIN32
+#ifdef _WIN32
   man_start_ne32 (man);
 #endif
 
@@ -1590,7 +1589,7 @@ man_accept (struct management *man)
 
       if (socket_defined (man->connection.sd_top))
 	{
-#ifdef WIN32
+#ifdef _WIN32
 	  man_stop_ne32 (man);
 #endif
 	}
@@ -1640,7 +1639,6 @@ man_listen (struct management *man)
        * Set misc socket properties
        */
       set_nonblock (man->connection.sd_top);
-      set_cloexec (man->connection.sd_top);
 
 #if UNIX_SOCK_SUPPORT
       if (man->settings.flags & MF_UNIX_SOCK)
@@ -1654,7 +1652,7 @@ man_listen (struct management *man)
 	     print_sockaddr (man->settings.local->ai_addr, &gc));
     }
 
-#ifdef WIN32
+#ifdef _WIN32
   man_start_ne32 (man);
 #endif
   
@@ -1737,7 +1735,7 @@ man_reset_client_socket (struct management *man, const bool exiting)
 {
   if (socket_defined (man->connection.sd_cli))
     {
-#ifdef WIN32
+#ifdef _WIN32
       man_stop_ne32 (man);
 #endif
       man_close_socket (man, man->connection.sd_cli);
@@ -2254,7 +2252,7 @@ man_connection_init (struct management *man)
 {
   if (man->connection.state == MS_INITIAL)
     {
-#ifdef WIN32
+#ifdef _WIN32
       /*
        * This object is a sort of TCP/IP helper
        * for Windows.
@@ -2295,7 +2293,7 @@ man_connection_close (struct management *man)
 
   if (mc->es)
     event_free (mc->es);
-#ifdef WIN32
+#ifdef _WIN32
   net_event_win32_close (&mc->ne32);
 #endif
   if (socket_defined (mc->sd_top))
@@ -2731,7 +2729,7 @@ man_persist_state (unsigned int *persistent, const int n)
   return true;
 }
 
-#ifdef WIN32
+#ifdef _WIN32
 
 void
 management_socket_set (struct management *man,
@@ -3154,7 +3152,7 @@ management_query_user_pass (struct management *man,
 	  man->connection.up_query.nocache = up->nocache; /* preserve caller's nocache setting */
 	  *up = man->connection.up_query;
 	}
-      CLEAR (man->connection.up_query);
+      secure_memzero (&man->connection.up_query, sizeof (man->connection.up_query));
     }
 
   gc_free (&gc);

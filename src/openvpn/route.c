@@ -49,7 +49,7 @@
 #include <linux/rtnetlink.h>		/* RTM_GETROUTE etc. */
 #endif
 
-#ifdef WIN32
+#ifdef _WIN32
 #include "openvpn-msg.h"
 
 #define METRIC_NOT_USED ((DWORD)-1)
@@ -807,7 +807,7 @@ init_route_ipv6_list (struct route_ipv6_list *rl6,
 	  if ( !(rl6->rgi6.flags & RGI_ON_LINK) )
 	    { r6->gateway = rl6->rgi6.gateway.addr_ipv6; }
 	  r6->metric = 1;
-#ifdef WIN32
+#ifdef _WIN32
 	  r6->adapter_index = rl6->rgi6.adapter_index;
 #else
 	  r6->iface = rl6->rgi6.iface;
@@ -1214,7 +1214,7 @@ print_default_gateway(const int msglevel,
 	buf_printf (&out, " %s", print_in_addr_t (rgi->gateway.addr, 0, &gc));
       if (rgi->flags & RGI_NETMASK_DEFINED)
 	buf_printf (&out, "/%s", print_in_addr_t (rgi->gateway.netmask, 0, &gc));
-#ifdef WIN32
+#ifdef _WIN32
       if (rgi->flags & RGI_IFACE_DEFINED)
 	buf_printf (&out, " I=%u", (unsigned int)rgi->adapter_index);
 #else
@@ -1235,7 +1235,7 @@ print_default_gateway(const int msglevel,
 	buf_printf (&out, " ON_LINK");
       if (rgi6->flags & RGI_NETMASK_DEFINED)
 	buf_printf (&out, "/%d", rgi6->gateway.netbits_ipv6);
-#ifdef WIN32
+#ifdef _WIN32
       if (rgi6->flags & RGI_IFACE_DEFINED)
 	buf_printf (&out, " I=%u", (unsigned int)rgi6->adapter_index);
 #else
@@ -1395,7 +1395,7 @@ add_route (struct route_ipv4 *r,
 	   const struct env_set *es)
 {
   struct gc_arena gc;
-  struct argv argv;
+  struct argv argv = argv_new ();
   const char *network;
   const char *netmask;
   const char *gateway;
@@ -1406,7 +1406,6 @@ add_route (struct route_ipv4 *r,
     return;
 
   gc_init (&gc);
-  argv_init (&argv);
 
   network = print_in_addr_t (r->network, 0, &gc);
   netmask = print_in_addr_t (r->netmask, 0, &gc);
@@ -1455,7 +1454,7 @@ add_route (struct route_ipv4 *r,
     buf_printf (&out, "%s %s %s", network, netmask, gateway);
   management_android_control (management, "ROUTE", buf_bptr(&out));
 
-#elif defined (WIN32)
+#elif defined (_WIN32)
   {
     DWORD ai = TUN_ADAPTER_INDEX_INVALID;
     argv_printf (&argv, "%s%sc ADD %s MASK %s %s",
@@ -1671,7 +1670,7 @@ void
 add_route_ipv6 (struct route_ipv6 *r6, const struct tuntap *tt, unsigned int flags, const struct env_set *es)
 {
   struct gc_arena gc;
-  struct argv argv;
+  struct argv argv = argv_new ();
 
   const char *network;
   const char *gateway;
@@ -1683,7 +1682,7 @@ add_route_ipv6 (struct route_ipv6 *r6, const struct tuntap *tt, unsigned int fla
   if (! (r6->flags & RT_DEFINED) )
     return;
 
-#ifndef WIN32
+#ifndef _WIN32
   if ( r6->iface != NULL )		/* vpn server special route */
     {
       device = r6->iface;
@@ -1693,7 +1692,6 @@ add_route_ipv6 (struct route_ipv6 *r6, const struct tuntap *tt, unsigned int fla
 #endif
 
   gc_init (&gc);
-  argv_init (&argv);
 
   route_ipv6_clear_host_bits (r6);
 
@@ -1779,7 +1777,7 @@ add_route_ipv6 (struct route_ipv6 *r6, const struct tuntap *tt, unsigned int fla
 
     management_android_control (management, "ROUTE6", buf_bptr(&out));
 
-#elif defined (WIN32)
+#elif defined (_WIN32)
 
   if (tt->options.msg_channel)
     status = add_route_ipv6_service (r6, tt);
@@ -1933,7 +1931,7 @@ delete_route (struct route_ipv4 *r,
 	      const struct env_set *es)
 {
   struct gc_arena gc;
-  struct argv argv;
+  struct argv argv = argv_new ();
   const char *network;
   const char *netmask;
   const char *gateway;
@@ -1943,7 +1941,6 @@ delete_route (struct route_ipv4 *r,
     return;
 
   gc_init (&gc);
-  argv_init (&argv);
 
   network = print_in_addr_t (r->network, 0, &gc);
   netmask = print_in_addr_t (r->netmask, 0, &gc);
@@ -1970,7 +1967,7 @@ delete_route (struct route_ipv4 *r,
   argv_msg (D_ROUTE, &argv);
   openvpn_execve_check (&argv, es, 0, "ERROR: Linux route delete command failed");
 
-#elif defined (WIN32)
+#elif defined (_WIN32)
   
   argv_printf (&argv, "%s%sc DELETE %s MASK %s %s",
 	       get_win_sys_path(),
@@ -2108,7 +2105,7 @@ void
 delete_route_ipv6 (const struct route_ipv6 *r6, const struct tuntap *tt, unsigned int flags, const struct env_set *es)
 {
   struct gc_arena gc;
-  struct argv argv;
+  struct argv argv = argv_new ();
   const char *network;
   const char *gateway;
   const char *device = tt->actual_name;
@@ -2117,7 +2114,7 @@ delete_route_ipv6 (const struct route_ipv6 *r6, const struct tuntap *tt, unsigne
   if ((r6->flags & (RT_DEFINED|RT_ADDED)) != (RT_DEFINED|RT_ADDED))
     return;
 
-#ifndef WIN32
+#ifndef _WIN32
   if ( r6->iface != NULL )		/* vpn server special route */
     {
       device = r6->iface;
@@ -2126,7 +2123,6 @@ delete_route_ipv6 (const struct route_ipv6 *r6, const struct tuntap *tt, unsigne
 #endif
 
   gc_init (&gc);
-  argv_init (&argv);
 
   network = print_in6_addr( r6->network, 0, &gc);
   gateway = print_in6_addr( r6->gateway, 0, &gc);
@@ -2184,7 +2180,7 @@ delete_route_ipv6 (const struct route_ipv6 *r6, const struct tuntap *tt, unsigne
   argv_msg (D_ROUTE, &argv);
   openvpn_execve_check (&argv, es, 0, "ERROR: Linux route -6/-A inet6 del command failed");
 
-#elif defined (WIN32)
+#elif defined (_WIN32)
 
   if (tt->options.msg_channel)
     del_route_ipv6_service (r6, tt);
@@ -2320,7 +2316,7 @@ delete_route_ipv6 (const struct route_ipv6 *r6, const struct tuntap *tt, unsigne
  * to get the current default gateway.
  */
 
-#if defined(WIN32)
+#if defined(_WIN32)
 
 static const MIB_IPFORWARDTABLE *
 get_windows_routing_table (struct gc_arena *gc)
@@ -3698,7 +3694,7 @@ int netmask_to_netbits2 (in_addr_t netmask)
  * so that outgoing packets to these servers don't end up in the tunnel.
  */
 
-#if defined(WIN32)
+#if defined(_WIN32)
 
 static void
 add_host_route_if_nonlocal (struct route_bypass *rb, const in_addr_t addr)
@@ -3772,7 +3768,7 @@ get_bypass_addresses (struct route_bypass *rb, const unsigned int flags)  /* PLA
  * Used by redirect-gateway autolocal feature
  */
 
-#if defined(WIN32)
+#if defined(_WIN32)
 
 int
 test_local_addr (const in_addr_t addr, const struct route_gateway_info *rgi)

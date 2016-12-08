@@ -558,9 +558,13 @@ struct options
   /* Old key allowed to live n seconds after new key goes active */
   int transition_window;
 
-  /* Special authentication MAC for TLS control channel */
-  const char *tls_auth_file;		/* shared secret */
+  /* Shared secret used for TLS control channel authentication */
+  const char *tls_auth_file;
   const char *tls_auth_file_inline;
+
+  /* Shared secret used for TLS control channel authenticated encryption */
+  const char *tls_crypt_file;
+  const char *tls_crypt_inline;
 
   /* Allow only one session */
   bool single_session;
@@ -578,7 +582,7 @@ struct options
   /* special state parms */
   int foreign_option_index;
 
-#ifdef WIN32
+#ifdef _WIN32
   HANDLE msg_channel;
   const char *exit_event_name;
   bool exit_event_initial_state;
@@ -597,6 +601,10 @@ struct options
 #endif
 
   struct pull_filter_list *pull_filter_list;
+
+  /* Useful when packets sent by openvpn itself are not subject
+     to the routing tables that would move packets into the tunnel. */
+  bool allow_recursive_routing;
 };
 
 #define streq(x, y) (!strcmp((x), (y)))
@@ -651,7 +659,7 @@ struct options
 #define PUSH_DEFINED(opt) (false)
 #endif
 
-#ifdef WIN32
+#ifdef _WIN32
 #define ROUTE_OPTION_FLAGS(o) ((o)->route_method & ROUTE_METHOD_MASK)
 #else
 #define ROUTE_OPTION_FLAGS(o) (0)
@@ -689,7 +697,7 @@ void usage_small (void);
 
 void show_library_versions(const unsigned int flags);
 
-#ifdef WIN32
+#ifdef _WIN32
 void show_windows_version(const unsigned int flags);
 #endif
 
@@ -717,6 +725,20 @@ bool options_cmp_equal (char *actual, const char *expected);
 void options_warning (char *actual, const char *expected);
 
 #endif
+
+/**
+ * Given an OpenVPN options string, extract the value of an option.
+ *
+ * @param options_string	Zero-terminated, comma-separated options string
+ * @param opt_name		The name of the option to extract
+ * @param gc			The gc to allocate the return value
+ *
+ * @return gc-allocated value of option with name opt_name if option was found,
+ *         or NULL otherwise.
+ */
+char *options_string_extract_option (const char *options_string,
+    const char *opt_name, struct gc_arena *gc);
+
 
 void options_postprocess (struct options *options);
 

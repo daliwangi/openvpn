@@ -36,6 +36,7 @@ endif
 sbin_PROGRAMS = openvpn
 
 openvpn_SOURCES = \
+	argv.c argv.h \
 	base64.c base64.h \
 	basic.h \
 	buffer.c buffer.h \
@@ -112,6 +113,7 @@ openvpn_SOURCES = \
 	ssl_verify_mbedtls.c ssl_verify_mbedtls.h \
 	status.c status.h \
 	syshead.h \
+	tls_crypt.c tls_crypt.h \
 	tun.c tun.h \
 	win32.h win32.c \
 	cryptoapi.h cryptoapi.c

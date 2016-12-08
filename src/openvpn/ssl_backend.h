@@ -124,6 +124,8 @@ int tls_version_parse(const char *vstr, const char *extra);
  */
 int tls_version_max(void);
 
+#ifdef ENABLE_CRYPTO
+
 /**
  * Initialise a library-specific TLS context for a server.
  *
@@ -230,7 +232,7 @@ int tls_ctx_load_pkcs12(struct tls_root_ctx *ctx, const char *pkcs12_file,
  */
 #ifdef ENABLE_CRYPTOAPI
 void tls_ctx_load_cryptoapi(struct tls_root_ctx *ctx, const char *cryptoapi_cert);
-#endif /* WIN32 */
+#endif /* _WIN32 */
 
 /**
  * Load certificate file into the given TLS context. If the given certificate
@@ -342,6 +344,17 @@ void key_state_ssl_init(struct key_state_ssl *ks_ssl,
  * @param ks_ssl	The SSL channel's state info to free
  */
 void key_state_ssl_free(struct key_state_ssl *ks_ssl);
+
+/**
+ * Reload the Certificate Revocation List for the SSL channel
+ *
+ * @param ssl_ctx       The TLS context to use when reloading the CRL
+ * @param crl_file      The file name to load the CRL from, or
+ *                      "[[INLINE]]" in the case of inline files.
+ * @param crl_inline    A string containing the CRL
+ */
+void backend_tls_ctx_reload_crl(struct tls_root_ctx *ssl_ctx,
+    const char *crl_file, const char *crl_inline);
 
 /**
  * Keying Material Exporters [RFC 5705] allows additional keying material to be
@@ -510,4 +523,5 @@ void get_highest_preference_tls_cipher (char *buf, int size);
  */
 const char * get_ssl_library_version(void);
 
+#endif /* ENABLE_CRYPTO */
 #endif /* SSL_BACKEND_H_ */

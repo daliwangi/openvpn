@@ -30,6 +30,10 @@
 
 #include "syshead.h"
 
+#ifdef ENABLE_SYSTEMD
+#include <systemd/sd-daemon.h>
+#endif
+
 #include "win32.h"
 #include "init.h"
 #include "sig.h"
@@ -44,6 +48,7 @@
 #include "ping.h"
 #include "mstats.h"
 #include "ssl_verify.h"
+#include "tls_crypt.h"
 #include "forward-inline.h"
 
 #include "memdbg.h"
@@ -577,7 +582,7 @@ init_static (void)
   error_reset ();		/* initialize error.c */
   reset_check_status ();	/* initialize status check code in socket.c */
 
-#ifdef WIN32
+#ifdef _WIN32
   init_win32 ();
 #endif
 
@@ -925,6 +930,13 @@ bool
 possibly_become_daemon (const struct options *options)
 {
   bool ret = false;
+
+#ifdef ENABLE_SYSTEMD
+  /* return without forking if we are running from systemd */
+  if (sd_notify(0, "READY=0") > 0)
+    return ret;
+#endif
+
   if (options->daemon)
     {
       ASSERT (!options->inetd);
@@ -1024,7 +1036,7 @@ format_common_name (struct context *c, struct gc_arena *gc)
 void
 pre_setup (const struct options *options)
 {
-#ifdef WIN32
+#ifdef _WIN32
   if (options->exit_event_name)
     {
       win32_signal_open (&win32_signal,
@@ -1157,7 +1169,6 @@ static void
 do_init_route_list (const struct options *options,
 		    struct route_list *route_list,
 		    const struct link_socket_info *link_socket_info,
-		    bool fatal,
 		    struct env_set *es)
 {
   const char *gw = NULL;
@@ -1171,17 +1182,12 @@ do_init_route_list (const struct options *options,
   if (options->route_default_metric)
     metric = options->route_default_metric;
 
-  if (!init_route_list (route_list,
+  if (init_route_list (route_list,
 			options->routes,
 			gw,
 			metric,
 			link_socket_current_remote (link_socket_info),
 			es))
-    {
-      if (fatal)
-	openvpn_exit (OPENVPN_EXIT_STATUS_ERROR);	/* exit point */
-    }
-  else
     {
       /* copy routes to environment */
       setenv_routes (es, route_list);
@@ -1192,7 +1198,6 @@ static void
 do_init_route_ipv6_list (const struct options *options,
 		    struct route_ipv6_list *route_ipv6_list,
 		    const struct link_socket_info *link_socket_info,
-		    bool fatal,
 		    struct env_set *es)
 {
   const char *gw = NULL;
@@ -1222,17 +1227,12 @@ do_init_route_ipv6_list (const struct options *options,
 	}
     }
 
-  if (!init_route_ipv6_list (route_ipv6_list,
+  if (init_route_ipv6_list (route_ipv6_list,
 			options->routes_ipv6,
 			gw,
 			metric,
 			link_socket_current_remote_ipv6 (link_socket_info),
 			es))
-    {
-      if (fatal)
-	openvpn_exit (OPENVPN_EXIT_STATUS_ERROR);	/* exit point */
-    }
-  else
     {
       /* copy routes to environment */
       setenv_routes_ipv6 (es, route_ipv6_list);
@@ -1257,22 +1257,30 @@ initialization_sequence_completed (struct context *c, const unsigned int flags)
   /* Test if errors */
   if (flags & ISC_ERRORS)
     {
-#ifdef WIN32
+#ifdef _WIN32
       show_routes (M_INFO|M_NOPREFIX);
       show_adapters (M_INFO|M_NOPREFIX);
       msg (M_INFO, "%s With Errors ( see http://openvpn.net/faq.html#dhcpclientserv )", message);
 #else
+#ifdef ENABLE_SYSTEMD
+      sd_notifyf(0, "STATUS=Failed to start up: %s With Errors\nERRNO=1", message);
+#endif /* HAVE_SYSTEMD_SD_DAEMON_H */
       msg (M_INFO, "%s With Errors", message);
 #endif
     }
   else
-    msg (M_INFO, "%s", message);
+    {
+#ifdef ENABLE_SYSTEMD
+      sd_notifyf(0, "READY=1\nSTATUS=%s\nMAINPID=%lu", message, (unsigned long) getpid());
+#endif
+      msg (M_INFO, "%s", message);
+    }
 
   /* Flag that we initialized */
   if ((flags & (ISC_ERRORS|ISC_SERVER)) == 0)
     c->options.no_advance=true;
 
-#ifdef WIN32
+#ifdef _WIN32
   fork_register_dns_action (c->c1.tuntap);
 #endif
 
@@ -1362,12 +1370,12 @@ do_route (const struct options *options,
     {
       struct argv argv = argv_new ();
       setenv_str (es, "script_type", "route-up");
-      argv_printf (&argv, "%sc", options->route_script);
+      argv_parse_cmd (&argv, options->route_script);
       openvpn_run_script (&argv, es, 0, "--route-up");
       argv_reset (&argv);
     }
 
-#ifdef WIN32
+#ifdef _WIN32
   if (options->show_net_up)
     {
       show_routes (M_INFO|M_NOPREFIX);
@@ -1433,7 +1441,7 @@ do_open_tun (struct context *c)
       /* initialize (but do not open) tun/tap object */
       do_init_tun (c);
 
-#ifdef WIN32
+#ifdef _WIN32
       /* store (hide) interactive service handle in tuntap_options */
       c->c1.tuntap->options.msg_channel = c->options.msg_channel;
       msg (D_ROUTE, "interactive service msg_channel=%u", (unsigned int) c->options.msg_channel);
@@ -1443,10 +1451,13 @@ do_open_tun (struct context *c)
       do_alloc_route_list (c);
 
       /* parse and resolve the route option list */
-      if (c->options.routes && c->c1.route_list && c->c2.link_socket)
-	do_init_route_list (&c->options, c->c1.route_list, &c->c2.link_socket->info, false, c->c2.es);
-      if (c->options.routes_ipv6 && c->c1.route_ipv6_list )
-	do_init_route_ipv6_list (&c->options, c->c1.route_ipv6_list, &c->c2.link_socket->info, false, c->c2.es);
+      ASSERT(c->c2.link_socket);
+      if (c->options.routes && c->c1.route_list)
+	do_init_route_list (&c->options, c->c1.route_list,
+			    &c->c2.link_socket->info, c->c2.es);
+      if (c->options.routes_ipv6 && c->c1.route_ipv6_list)
+	do_init_route_ipv6_list (&c->options, c->c1.route_ipv6_list,
+				 &c->c2.link_socket->info, c->c2.es);
 
       /* do ifconfig */
       if (!c->options.ifconfig_noexec
@@ -1491,7 +1502,7 @@ do_open_tun (struct context *c)
 		   c->plugins,
 		   OPENVPN_PLUGIN_UP,
 		   c->c1.tuntap->actual_name,
-#ifdef WIN32
+#ifdef _WIN32
 		   c->c1.tuntap->adapter_index,
 #endif
 		   dev_type_string (c->options.dev, c->options.dev_type),
@@ -1504,7 +1515,7 @@ do_open_tun (struct context *c)
 		   "up",
 		   c->c2.es);
 
-#if defined(WIN32)
+#if defined(_WIN32)
       if (c->options.block_outside_dns)
       {
         dmsg (D_LOW, "Blocking outside DNS");
@@ -1544,7 +1555,7 @@ do_open_tun (struct context *c)
 		     c->plugins,
 		     OPENVPN_PLUGIN_UP,
 		     c->c1.tuntap->actual_name,
-#ifdef WIN32
+#ifdef _WIN32
 		     c->c1.tuntap->adapter_index,
 #endif
 		     dev_type_string (c->options.dev, c->options.dev_type),
@@ -1556,7 +1567,7 @@ do_open_tun (struct context *c)
 		     NULL,
 		     "up",
 		     c->c2.es);
-#if defined(WIN32)
+#if defined(_WIN32)
       if (c->options.block_outside_dns)
         {
           dmsg (D_LOW, "Blocking outside DNS");
@@ -1594,7 +1605,7 @@ do_close_tun (struct context *c, bool force)
   if (c->c1.tuntap && c->c1.tuntap_owned)
     {
       const char *tuntap_actual = string_alloc (c->c1.tuntap->actual_name, &gc);
-#ifdef WIN32
+#ifdef _WIN32
       DWORD adapter_index = c->c1.tuntap->adapter_index;
 #endif
       const in_addr_t local = c->c1.tuntap->local;
@@ -1620,7 +1631,7 @@ do_close_tun (struct context *c, bool force)
                            c->plugins,
                            OPENVPN_PLUGIN_ROUTE_PREDOWN,
                            tuntap_actual,
-#ifdef WIN32
+#ifdef _WIN32
                            adapter_index,
 #endif
                            NULL,
@@ -1648,7 +1659,7 @@ do_close_tun (struct context *c, bool force)
 		       c->plugins,
 		       OPENVPN_PLUGIN_DOWN,
 		       tuntap_actual,
-#ifdef WIN32
+#ifdef _WIN32
 		       adapter_index,
 #endif
 		       NULL,
@@ -1662,7 +1673,7 @@ do_close_tun (struct context *c, bool force)
 		       "down",
 		       c->c2.es);
 
-#if defined(WIN32)
+#if defined(_WIN32)
             if (c->options.block_outside_dns)
             {
                 if (!win_wfp_uninit(c->options.msg_channel))
@@ -1682,7 +1693,7 @@ do_close_tun (struct context *c, bool force)
 			 c->plugins,
 			 OPENVPN_PLUGIN_DOWN,
 			 tuntap_actual,
-#ifdef WIN32
+#ifdef _WIN32
 			 adapter_index,
 #endif
 			 NULL,
@@ -1696,7 +1707,7 @@ do_close_tun (struct context *c, bool force)
 			 "down",
 			 c->c2.es);
 
-#if defined(WIN32)
+#if defined(_WIN32)
           if (c->options.block_outside_dns)
             {
               if (!win_wfp_uninit(c->options.msg_channel))
@@ -1940,8 +1951,14 @@ do_deferred_options (struct context *c, const unsigned int found)
     {
       struct tls_session *session = &c->c2.tls_multi->session[TM_ACTIVE];
       if (found & OPT_P_NCP)
-	msg (D_PUSH, "OPTIONS IMPORT: data channel crypto options modified");
-      /* Do not regenerate keys if server sends an extra push request */
+	{
+	  msg (D_PUSH, "OPTIONS IMPORT: data channel crypto options modified");
+	}
+      else if (c->options.ncp_enabled)
+	{
+	  tls_poor_mans_ncp(&c->options, c->c2.tls_multi->remote_ciphername);
+	}
+      /* Do not regenerate keys if server sends an extra push reply */
       if (!session->key[KS_PRIMARY].crypto_options.key_ctx_bi.initialized &&
 	  !tls_session_update_crypto_params(session, &c->options, &c->c2.frame))
 	{
@@ -2087,7 +2104,7 @@ key_schedule_free (struct key_schedule *ks, bool free_ssl_ctx)
   if (tls_ctx_initialised(&ks->ssl_ctx) && free_ssl_ctx)
     {
       tls_ctx_free (&ks->ssl_ctx);
-      free_key_ctx_bi (&ks->tls_auth_key);
+      free_key_ctx_bi (&ks->tls_wrap_key);
     }
 #endif /* ENABLE_CRYPTO */
   CLEAR (*ks);
@@ -2148,41 +2165,16 @@ do_init_crypto_static (struct context *c, const unsigned int flags)
 
   if (!key_ctx_bi_defined (&c->c1.ks.static_key))
     {
-      struct key2 key2;
-      struct key_direction_state kds;
-
       /* Get cipher & hash algorithms */
       init_key_type (&c->c1.ks.key_type, options->ciphername, options->authname,
 		     options->keysize, options->test_crypto, true);
 
       /* Read cipher and hmac keys from shared secret file */
-      {
-	unsigned int rkf_flags = RKF_MUST_SUCCEED;
-	const char *rkf_file = options->shared_secret_file;
-
-	if (options->shared_secret_file_inline)
-	  {
-	    rkf_file = options->shared_secret_file_inline;
-	    rkf_flags |= RKF_INLINE;
-	  }
-	read_key_file (&key2, rkf_file, rkf_flags);
-      }
-
-      /* Check for and fix highly unlikely key problems */
-      verify_fix_key2 (&key2, &c->c1.ks.key_type,
-		       options->shared_secret_file);
-
-      /* Initialize OpenSSL key objects */
-      key_direction_state_init (&kds, options->key_direction);
-      must_have_n_keys (options->shared_secret_file, "secret", &key2,
-			kds.need_keys);
-      init_key_ctx (&c->c1.ks.static_key.encrypt, &key2.keys[kds.out_key],
-		    &c->c1.ks.key_type, OPENVPN_OP_ENCRYPT, "Static Encrypt");
-      init_key_ctx (&c->c1.ks.static_key.decrypt, &key2.keys[kds.in_key],
-		    &c->c1.ks.key_type, OPENVPN_OP_DECRYPT, "Static Decrypt");
-
-      /* Erase the temporary copy of key */
-      CLEAR (key2);
+      crypto_read_openvpn_key (&c->c1.ks.key_type, &c->c1.ks.static_key,
+			       options->shared_secret_file,
+			       options->shared_secret_file_inline,
+			       options->key_direction, "Static Key Encryption",
+			       "secret");
     }
   else
     {
@@ -2251,15 +2243,6 @@ do_init_crypto_tls_c1 (struct context *c)
       /* TLS handshake authentication (--tls-auth) */
       if (options->tls_auth_file)
 	{
-	  unsigned int flags = 0;
-	  const char *file = options->tls_auth_file;
-
-	  if (options->tls_auth_file_inline)
-	    {
-	      flags |= GHK_INLINE;
-	      file = options->tls_auth_file_inline;
-	    }
-
 	  /* Initialize key_type for tls-auth with auth only */
 	  CLEAR (c->c1.ks.tls_auth_key_type);
 	  if (!streq (options->authname, "none"))
@@ -2274,12 +2257,21 @@ do_init_crypto_tls_c1 (struct context *c)
 		  "algorithm specified ('%s')", options->authname);
 	    }
 
-	  get_tls_handshake_key (&c->c1.ks.tls_auth_key_type,
-	      &c->c1.ks.tls_auth_key, file, options->key_direction, flags);
+	  crypto_read_openvpn_key (&c->c1.ks.tls_auth_key_type,
+	      &c->c1.ks.tls_wrap_key, options->tls_auth_file,
+	      options->tls_auth_file_inline, options->key_direction,
+	      "Control Channel Authentication", "tls-auth");
 	}
+
+      /* TLS handshake encryption+authentication (--tls-crypt) */
+      if (options->tls_crypt_file) {
+	  tls_crypt_init_key (&c->c1.ks.tls_wrap_key, options->tls_crypt_file,
+	      options->tls_crypt_inline, options->tls_server);
+      }
 
       c->c1.ciphername = options->ciphername;
       c->c1.authname = options->authname;
+      c->c1.keysize = options->keysize;
 
 #if 0 /* was: #if ENABLE_INLINE_FILES --  Note that enabling this code will break restarts */
       if (options->priv_key_file_inline)
@@ -2292,6 +2284,11 @@ do_init_crypto_tls_c1 (struct context *c)
   else
     {
       msg (D_INIT_MEDIUM, "Re-using SSL/TLS context");
+
+      /* Restore pre-NCP cipher options */
+      c->options.ciphername = c->c1.ciphername;
+      c->options.authname = c->c1.authname;
+      c->options.keysize = c->c1.keysize;
     }
 }
 
@@ -2344,9 +2341,9 @@ do_init_crypto_tls (struct context *c, const unsigned int flags)
   if (options->mute_replay_warnings)
     to.crypto_flags |= CO_MUTE_REPLAY_WARNINGS;
 
-  to.crypto_flags_and = ~(CO_PACKET_ID_LONG_FORM);
+  to.crypto_flags &= ~(CO_PACKET_ID_LONG_FORM);
   if (packet_id_long_form)
-    to.crypto_flags_or = CO_PACKET_ID_LONG_FORM;
+    to.crypto_flags |= CO_PACKET_ID_LONG_FORM;
 
   to.ssl_ctx = c->c1.ks.ssl_ctx;
   to.key_type = c->c1.ks.key_type;
@@ -2456,12 +2453,23 @@ do_init_crypto_tls (struct context *c, const unsigned int flags)
   /* TLS handshake authentication (--tls-auth) */
   if (options->tls_auth_file)
     {
-      to.tls_auth.key_ctx_bi = c->c1.ks.tls_auth_key;
-      to.tls_auth.pid_persist = &c->c1.pid_persist;
-      to.tls_auth.flags |= CO_PACKET_ID_LONG_FORM;
+      to.tls_wrap.mode = TLS_WRAP_AUTH;
+      to.tls_wrap.opt.key_ctx_bi = c->c1.ks.tls_wrap_key;
+      to.tls_wrap.opt.pid_persist = &c->c1.pid_persist;
+      to.tls_wrap.opt.flags |= CO_PACKET_ID_LONG_FORM;
       crypto_adjust_frame_parameters (&to.frame,
 				      &c->c1.ks.tls_auth_key_type,
 				      false, true, true);
+    }
+
+  /* TLS handshake encryption (--tls-crypt) */
+  if (options->tls_crypt_file)
+    {
+      to.tls_wrap.mode = TLS_WRAP_CRYPT;
+      to.tls_wrap.opt.key_ctx_bi = c->c1.ks.tls_wrap_key;
+      to.tls_wrap.opt.pid_persist = &c->c1.pid_persist;
+      to.tls_wrap.opt.flags |= CO_PACKET_ID_LONG_FORM;
+      tls_crypt_adjust_frame_parameters (&to.frame);
     }
 
   /* If we are running over TCP, allow for
@@ -3211,7 +3219,7 @@ do_setup_fast_io (struct context *c)
 {
   if (c->options.fast_io)
     {
-#ifdef WIN32
+#ifdef _WIN32
       msg (M_INFO, "NOTE: --fast-io is disabled since we are running on Windows");
 #else
       if (!proto_is_udp(c->options.ce.proto))
@@ -3324,7 +3332,7 @@ management_callback_status_p2p (void *arg, const int version, struct status_outp
 void
 management_show_net_callback (void *arg, const int msglevel)
 {
-#ifdef WIN32
+#ifdef _WIN32
   show_routes (msglevel);
   show_adapters (msglevel);
   msg (msglevel, "END");
@@ -3827,8 +3835,12 @@ inherit_context_child (struct context *dest,
   dest->c1.ks.key_type = src->c1.ks.key_type;
   /* inherit SSL context */
   dest->c1.ks.ssl_ctx = src->c1.ks.ssl_ctx;
-  dest->c1.ks.tls_auth_key = src->c1.ks.tls_auth_key;
+  dest->c1.ks.tls_wrap_key = src->c1.ks.tls_wrap_key;
   dest->c1.ks.tls_auth_key_type = src->c1.ks.tls_auth_key_type;
+  /* inherit pre-NCP ciphers */
+  dest->c1.ciphername = src->c1.ciphername;
+  dest->c1.authname = src->c1.authname;
+  dest->c1.keysize = src->c1.keysize;
 #endif
 
   /* options */

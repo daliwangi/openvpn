@@ -204,6 +204,18 @@ struct key_state
 #endif
 };
 
+/** Control channel wrapping (--tls-auth/--tls-crypt) context */
+struct tls_wrap_ctx
+{
+  enum {
+    TLS_WRAP_NONE = 0,	/**< No control channel wrapping */
+    TLS_WRAP_AUTH,	/**< Control channel authentication */
+    TLS_WRAP_CRYPT,	/**< Control channel encryption and authentication */
+  } mode;			/**< Control channel wrapping mode */
+  struct crypto_options opt;	/**< Crypto state */
+  struct buffer work;		/**< Work buffer (only for --tls-crypt) */
+};
+
 /*
  * Our const options, obtained directly or derived from
  * command line options.
@@ -267,8 +279,6 @@ struct tls_options
 
   /* struct crypto_option flags */
   unsigned int crypto_flags;
-  unsigned int crypto_flags_and;
-  unsigned int crypto_flags_or;
 
   int replay_window;                   /* --replay-window parm */
   int replay_time;                     /* --replay-window parm */
@@ -278,8 +288,8 @@ struct tls_options
   const char *config_authname;
   bool ncp_enabled;
 
-  /* packet authentication for TLS handshake */
-  struct crypto_options tls_auth;
+  /** TLS handshake wrapping state */
+  struct tls_wrap_ctx tls_wrap;
 
   /* frame parameters for TLS control channel */
   struct frame frame;
@@ -380,7 +390,7 @@ struct tls_session
   bool burst;
 
   /* authenticate control packets */
-  struct crypto_options tls_auth;
+  struct tls_wrap_ctx tls_wrap;
 
   int initial_opcode;		/* our initial P_ opcode */
   struct session_id session_id;	/* our random session ID */
@@ -527,6 +537,8 @@ struct tls_multi
   /* For P_DATA_V2 */
   uint32_t peer_id;
   bool use_peer_id;
+
+  char *remote_ciphername;	/**< cipher specified in peer's config file */
 
   char *auth_token;      /**< If server sends a generated auth-token,
                           *   this is the token to use for future

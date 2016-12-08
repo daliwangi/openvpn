@@ -65,9 +65,9 @@ struct key_schedule
   /* our global SSL context */
   struct tls_root_ctx ssl_ctx;
 
-  /* optional authentication HMAC key for TLS control channel */
+  /* optional TLS control channel wrapping */
   struct key_type tls_auth_key_type;
-  struct key_ctx_bi tls_auth_key;
+  struct key_ctx_bi tls_wrap_key;
 #else				/* ENABLE_CRYPTO */
   int dummy;
 #endif				/* ENABLE_CRYPTO */
@@ -213,6 +213,7 @@ struct context_1
 
   const char *ciphername;	/**< Data channel cipher from config file */
   const char *authname;		/**< Data channel auth from config file */
+  int keysize;			/**< Data channel keysize from config file */
 #endif
 };
 

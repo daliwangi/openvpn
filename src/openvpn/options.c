@@ -57,6 +57,7 @@
 #include "manage.h"
 #include "forward.h"
 #include "ssl_verify.h"
+#include "platform.h"
 #include <ctype.h>
 
 #include "memdbg.h"
@@ -103,7 +104,9 @@ const char title_string[] =
   " [MH/RECVDA]"
 # endif
 #endif
-  " [IPv6]"
+#ifdef HAVE_AEAD_CIPHER_MODES
+  " [AEAD]"
+#endif
   " built on " __DATE__
 ;
 
@@ -508,6 +511,8 @@ static const char usage_message[] =
   "--connect-timeout n : when polling possible remote servers to connect to\n"
   "                  in a round-robin fashion, spend no more than n seconds\n"
   "                  waiting for a response before trying the next server.\n"
+  "--allow-recursive-routing : When this option is set, OpenVPN will not drop\n"
+  "                  incoming tun packets with same destination as host.\n"
 #endif
 #ifdef ENABLE_OCC
   "--explicit-exit-notify [n] : On exit/restart, send exit signal to\n"
@@ -588,7 +593,7 @@ static const char usage_message[] =
   "                        Default is CN in the Subject field.\n"
 #endif
   "--verify-hash   : Specify SHA1 fingerprint for level-1 cert.\n"
-#ifdef WIN32
+#ifdef _WIN32
   "--cryptoapicert select-string : Load the certificate and private key from the\n"
   "                  Windows Certificate System Store.\n"
 #endif
@@ -606,9 +611,16 @@ static const char usage_message[] =
   "--single-session: Allow only one session (reset state on restart).\n"
   "--tls-exit      : Exit on TLS negotiation failure.\n"
   "--tls-auth f [d]: Add an additional layer of authentication on top of the TLS\n"
-  "                  control channel to protect against DoS attacks.\n"
-  "                  f (required) is a shared-secret passphrase file.\n"
+  "                  control channel to protect against attacks on the TLS stack\n"
+  "                  and DoS attacks.\n"
+  "                  f (required) is a shared-secret key file.\n"
   "                  The optional d parameter controls key directionality,\n"
+  "                  see --secret option for more info.\n"
+  "--tls-crypt key : Add an additional layer of authenticated encryption on top\n"
+  "                  of the TLS control channel to hide the TLS certificate,\n"
+  "                  provide basic post-quantum security and protect against\n"
+  "                  attacks on the TLS stack and DoS attacks.\n"
+  "                  key (required) provides the pre-shared key file.\n"
   "                  see --secret option for more info.\n"
   "--askpass [file]: Get PEM password from controlling tty before we daemonize.\n"
   "--auth-nocache  : Don't cache --askpass or --auth-user-pass passwords.\n"
@@ -666,7 +678,7 @@ static const char usage_message[] =
   "--show-digests  : Show message digest algorithms to use with --auth option.\n"
   "--show-engines  : Show hardware crypto accelerator engines (if available).\n"
   "--show-tls      : Show all TLS ciphers (TLS used only as a control channel).\n"
-#ifdef WIN32
+#ifdef _WIN32
   "\n"
   "Windows Specific:\n"
   "--win-sys path    : Pathname of Windows system directory. Default is the pathname\n"
@@ -692,7 +704,8 @@ static const char usage_message[] =
   "                    which allow multiple addresses,\n"
   "                    --dhcp-option must be repeated.\n"
   "                    DOMAIN name : Set DNS suffix\n"
-  "                    DNS addr    : Set domain name server address(es)\n"
+  "                    DNS addr    : Set domain name server address(es) (IPv4)\n"
+  "                    DNS6 addr   : Set domain name server address(es) (IPv6)\n"
   "                    NTP         : Set NTP server address(es)\n"
   "                    NBDD        : Set NBDD server address(es)\n"
   "                    WINS addr   : Set WINS server address(es)\n"
@@ -704,8 +717,8 @@ static const char usage_message[] =
   "--dhcp-pre-release : Ask Windows to release the previous TAP adapter lease on\n"
 "                       startup.\n"
   "--dhcp-release     : Ask Windows to release the TAP adapter lease on shutdown.\n"
-  "--register-dns  : Run net stop dnscache, net start dnscache, ipconfig /flushdns\n"
-  "                  and ipconfig /registerdns on connection initiation.\n"
+  "--register-dns  : Run ipconfig /flushdns and ipconfig /registerdns\n"
+  "                  on connection initiation.\n"
   "--tap-sleep n   : Sleep for n seconds after TAP adapter open before\n"
   "                  attempting to set adapter properties.\n"
   "--pause-exit         : When run from a console window, pause before exiting.\n"
@@ -716,7 +729,7 @@ static const char usage_message[] =
   "                       optional parameter controls the initial state of ex.\n"
   "--show-net-up   : Show " PACKAGE_NAME "'s view of routing table and net adapter list\n"
   "                  after TAP adapter is up and routes have been added.\n"
-#ifdef WIN32
+#ifdef _WIN32
   "--block-outside-dns   : Block DNS on other network adapters to prevent DNS leaks\n"
 #endif
   "Windows Standalone Options:\n"
@@ -812,7 +825,7 @@ init_options (struct options *o, const bool init_gc)
 #ifdef TARGET_LINUX
   o->tuntap_options.txqueuelen = 100;
 #endif
-#ifdef WIN32
+#ifdef _WIN32
 #if 0
   o->tuntap_options.ip_win32_type = IPW32_SET_ADAPTIVE;
 #else
@@ -869,12 +882,13 @@ init_options (struct options *o, const bool init_gc)
 #ifdef ENABLE_PKCS11
   o->pkcs11_pin_cache_period = -1;
 #endif			/* ENABLE_PKCS11 */
+
+/* P2MP server context features */
+#if P2MP_SERVER
   o->auth_token_generate = false;
 
-/* tmp is only used in P2MP server context */
-#if P2MP_SERVER
   /* Set default --tmp-dir */
-#ifdef WIN32
+#ifdef _WIN32
   /* On Windows, find temp dir via enviroment variables */
   o->tmp_dir = win_get_tempdir();
 #else
@@ -883,8 +897,9 @@ init_options (struct options *o, const bool init_gc)
   if( !o->tmp_dir ) {
           o->tmp_dir = "/tmp";
   }
-#endif /* WIN32 */
+#endif /* _WIN32 */
 #endif /* P2MP_SERVER */
+  o->allow_recursive_routing = false;
 }
 
 void
@@ -1135,7 +1150,7 @@ parse_hash_fingerprint(const char *str, int nbytes, int msglevel, struct gc_aren
 }
 #endif
 
-#ifdef WIN32
+#ifdef _WIN32
 
 #ifndef ENABLE_SMALL
 
@@ -1180,7 +1195,7 @@ show_tuntap_options (const struct tuntap_options *o)
 #endif
 #endif
 
-#if defined(WIN32) || defined(TARGET_ANDROID)
+#if defined(_WIN32) || defined(TARGET_ANDROID)
 static void
 dhcp_option_address_parse (const char *name, const char *parm, in_addr_t *array, int *len, int msglevel)
 {
@@ -1628,6 +1643,8 @@ show_settings (const struct options *o)
   SHOW_STR (shared_secret_file);
   SHOW_INT (key_direction);
   SHOW_STR (ciphername);
+  SHOW_BOOL (ncp_enabled);
+  SHOW_STR (ncp_ciphers);
   SHOW_STR (authname);
   SHOW_STR (prng_hash);
   SHOW_INT (prng_nonce_secret_len);
@@ -1703,6 +1720,7 @@ show_settings (const struct options *o)
   SHOW_BOOL (tls_exit);
 
   SHOW_STR (tls_auth_file);
+  SHOW_STR (tls_crypt_file);
 #endif /* ENABLE_CRYPTO */
 
 #ifdef ENABLE_PKCS11
@@ -1735,7 +1753,7 @@ show_settings (const struct options *o)
   show_p2mp_parms (o);
 #endif
 
-#ifdef WIN32
+#ifdef _WIN32
   SHOW_BOOL (show_net_up);
   SHOW_INT (route_method);
   SHOW_BOOL (block_outside_dns);
@@ -2027,7 +2045,7 @@ options_postprocess_verify_ce (const struct options *options, const struct conne
    * Windows-specific options.
    */
 
-#ifdef WIN32
+#ifdef _WIN32
       if (dev == DEV_TYPE_TUN && !(pull || (options->ifconfig_local && options->ifconfig_remote_netmask)))
 	msg (M_USAGE, "On Windows, --ifconfig is required when --dev tun is used");
 
@@ -2133,6 +2151,8 @@ options_postprocess_verify_ce (const struct options *options, const struct conne
 	msg (M_USAGE, "--ifconfig-pool-persist must be used with --ifconfig-pool");
       if (options->ifconfig_ipv6_pool_defined && !options->ifconfig_ipv6_local )
 	msg (M_USAGE, "--ifconfig-ipv6-pool needs --ifconfig-ipv6");
+      if (options->allow_recursive_routing)
+	msg (M_USAGE, "--allow-recursive-routing cannot be used with --mode server");
       if (options->auth_user_pass_file)
 	msg (M_USAGE, "--auth-user-pass cannot be used with --mode server (it should be used on the client side only)");
       if (options->ccd_exclusive && !options->client_config_dir)
@@ -2214,6 +2234,14 @@ options_postprocess_verify_ce (const struct options *options, const struct conne
     {
       msg (M_USAGE, "NCP cipher list contains unsupported ciphers.");
     }
+  if (options->ncp_enabled && !options->use_iv)
+    {
+      msg (M_USAGE, "--no-iv not allowed when NCP is enabled.");
+    }
+  if (!options->use_iv)
+    {
+      msg (M_WARN, "WARNING: --no-iv is deprecated and will be removed in 2.5");
+    }
 
   /*
    * Check consistency of replay options
@@ -2235,6 +2263,13 @@ options_postprocess_verify_ce (const struct options *options, const struct conne
       msg (M_WARN, "WARNING: POTENTIALLY DANGEROUS OPTION "
 	  "--verify-client-cert none|optional (or --client-cert-not-required) "
 	  "may accept clients which do not present a certificate");
+    }
+
+  if (options->key_method == 1)
+    {
+      msg (M_WARN, "WARNING: --key-method 1 is deprecated and will be removed "
+	  "in OpenVPN 2.5.  By default --key-method 2 will be used if not set "
+	  "in the configuration file, which is the recommended approach.");
     }
 
   if (options->tls_server || options->tls_client)
@@ -2368,6 +2403,10 @@ options_postprocess_verify_ce (const struct options *options, const struct conne
 	      notnull (options->priv_key_file, "private key file (--key) or PKCS#12 file (--pkcs12)");
 	    }
 	}
+    if (options->tls_auth_file && options->tls_crypt_file)
+      {
+        msg (M_USAGE, "--tls-auth and --tls-crypt are mutually exclusive");
+      }
     }
   else
     {
@@ -2399,6 +2438,7 @@ options_postprocess_verify_ce (const struct options *options, const struct conne
       MUST_BE_UNDEF (handshake_window);
       MUST_BE_UNDEF (transition_window);
       MUST_BE_UNDEF (tls_auth_file);
+      MUST_BE_UNDEF (tls_crypt_file);
       MUST_BE_UNDEF (single_session);
 #ifdef ENABLE_PUSH_PEER_INFO
       MUST_BE_UNDEF (push_peer_info);
@@ -2494,10 +2534,26 @@ options_postprocess_mutate_ce (struct options *o, struct connection_entry *ce)
 
 }
 
+#ifdef _WIN32
+/* If iservice is in use, we need def1 method for redirect-gateway */
+static void
+remap_redirect_gateway_flags (struct options *opt)
+{
+  if (opt->routes
+      && opt->route_method == ROUTE_METHOD_SERVICE
+      && opt->routes->flags & RG_REROUTE_GW
+      && !(opt->routes->flags & RG_DEF1))
+    {
+      msg (M_INFO, "Flag 'def1' added to --redirect-gateway (iservice is in use)");
+      opt->routes->flags |= RG_DEF1;
+    }
+}
+#endif
+
 static void
 options_postprocess_mutate_invariant (struct options *options)
 {
-#ifdef WIN32
+#ifdef _WIN32
   const int dev = dev_type_enum (options->dev, options->dev_type);
 #endif
 
@@ -2508,7 +2564,7 @@ options_postprocess_mutate_invariant (struct options *options)
   if (options->inetd == INETD_NOWAIT)
     options->ifconfig_noexec = true;
 
-#ifdef WIN32
+#ifdef _WIN32
   if ((dev == DEV_TYPE_TUN || dev == DEV_TYPE_TAP) && !options->route_delay_defined)
     {
       if (options->mode == MODE_POINT_TO_POINT)
@@ -2523,6 +2579,8 @@ options_postprocess_mutate_invariant (struct options *options)
       options->tuntap_options.ip_win32_type = IPW32_SET_MANUAL;
       options->ifconfig_noexec = false;
     }
+
+  remap_redirect_gateway_flags (options);
 #endif
 
 #if P2MP_SERVER
@@ -2531,7 +2589,7 @@ options_postprocess_mutate_invariant (struct options *options)
    */
   if (options->mode == MODE_SERVER)
     {
-#ifdef WIN32
+#ifdef _WIN32
       /*
        * We need to explicitly set --tap-sleep because
        * we do not schedule event timers in the top-level context.
@@ -2673,6 +2731,7 @@ options_postprocess_mutate (struct options *o)
 #define CHKACC_FILEXSTWR (1<<2)  /** If file exists, is it writable? */
 #define CHKACC_INLINE (1<<3)     /** File is present if it's an inline file */
 #define CHKACC_ACPTSTDIN (1<<4)  /** If filename is stdin, it's allowed and "exists" */
+#define CHKACC_PRIVATE (1<<5)	 /** Warn if this (private) file is group/others accessible */
 
 static bool
 check_file_access(const int type, const char *file, const int mode, const char *opt)
@@ -2712,6 +2771,23 @@ check_file_access(const int type, const char *file, const int mode, const char *
   if (!errcode && (type & CHKACC_FILEXSTWR) && (platform_access (file, F_OK) == 0) )
     if (platform_access (file, W_OK) != 0)
       errcode = errno;
+
+  /* Warn if a given private file is group/others accessible. */
+  if (type & CHKACC_PRIVATE)
+    {
+      platform_stat_t st;
+      if (platform_stat (file, &st))
+	{
+	  msg (M_WARN | M_ERRNO, "WARNING: cannot stat file '%s'", file);
+	}
+#ifndef _WIN32
+      else
+	{
+	  if (st.st_mode & (S_IRWXG|S_IRWXO))
+	    msg (M_WARN, "WARNING: file '%s' is group or others accessible", file);
+	}
+#endif
+    }
 
   /* Scream if an error is found */
   if( errcode > 0 )
@@ -2788,7 +2864,7 @@ check_cmd_access(const char *command, const char *opt, const char *chroot)
 
   /* Extract executable path and arguments */
   argv = argv_new ();
-  argv_printf (&argv, "%sc", command);
+  argv_parse_cmd (&argv, command);
 
   /* if an executable is specified then check it; otherwise, complain */
   if (argv.argv[0])
@@ -2829,10 +2905,12 @@ options_postprocess_filechecks (struct options *options)
 #ifdef MANAGMENT_EXTERNAL_KEY
   if(!(options->management_flags & MF_EXTERNAL_KEY))
 #endif
-     errs |= check_file_access (CHKACC_FILE|CHKACC_INLINE, options->priv_key_file, R_OK,
-                             "--key");
-  errs |= check_file_access (CHKACC_FILE|CHKACC_INLINE, options->pkcs12_file, R_OK,
-                             "--pkcs12");
+    {
+      errs |= check_file_access (CHKACC_FILE|CHKACC_INLINE|CHKACC_PRIVATE,
+				 options->priv_key_file, R_OK, "--key");
+    }
+  errs |= check_file_access (CHKACC_FILE|CHKACC_INLINE|CHKACC_PRIVATE,
+			     options->pkcs12_file, R_OK, "--pkcs12");
 
   if (options->ssl_flags & SSLF_CRL_VERIFY_DIR)
     errs |= check_file_access_chroot (options->chroot_dir, CHKACC_FILE, options->crl_file, R_OK|X_OK,
@@ -2841,24 +2919,26 @@ options_postprocess_filechecks (struct options *options)
     errs |= check_file_access_chroot (options->chroot_dir, CHKACC_FILE|CHKACC_INLINE,
                                       options->crl_file, R_OK, "--crl-verify");
 
-  errs |= check_file_access (CHKACC_FILE|CHKACC_INLINE, options->tls_auth_file, R_OK,
-                             "--tls-auth");
-  errs |= check_file_access (CHKACC_FILE|CHKACC_INLINE, options->shared_secret_file, R_OK,
-                             "--secret");
+  errs |= check_file_access (CHKACC_FILE|CHKACC_INLINE|CHKACC_PRIVATE,
+			     options->tls_auth_file, R_OK, "--tls-auth");
+  errs |= check_file_access (CHKACC_FILE|CHKACC_INLINE|CHKACC_PRIVATE,
+			     options->tls_crypt_file, R_OK, "--tls-crypt");
+  errs |= check_file_access (CHKACC_FILE|CHKACC_INLINE|CHKACC_PRIVATE,
+			     options->shared_secret_file, R_OK, "--secret");
   errs |= check_file_access (CHKACC_DIRPATH|CHKACC_FILEXSTWR,
-                             options->packet_id_file, R_OK|W_OK, "--replay-persist");
+			     options->packet_id_file, R_OK|W_OK, "--replay-persist");
 
   /* ** Password files ** */
-  errs |= check_file_access (CHKACC_FILE|CHKACC_ACPTSTDIN,
+  errs |= check_file_access (CHKACC_FILE|CHKACC_ACPTSTDIN|CHKACC_PRIVATE,
                              options->key_pass_file, R_OK, "--askpass");
 #endif /* ENABLE_CRYPTO */
 #ifdef ENABLE_MANAGEMENT
-  errs |= check_file_access (CHKACC_FILE|CHKACC_ACPTSTDIN,
+  errs |= check_file_access (CHKACC_FILE|CHKACC_ACPTSTDIN|CHKACC_PRIVATE,
                              options->management_user_pass, R_OK,
                              "--management user/password file");
 #endif /* ENABLE_MANAGEMENT */
 #if P2MP
-  errs |= check_file_access (CHKACC_FILE|CHKACC_ACPTSTDIN,
+  errs |= check_file_access (CHKACC_FILE|CHKACC_ACPTSTDIN|CHKACC_PRIVATE,
                              options->auth_user_pass_file, R_OK,
                              "--auth-user-pass");
 #endif /* P2MP */
@@ -3184,6 +3264,9 @@ options_string (const struct options *o,
       {
 	if (o->tls_auth_file)
 	  buf_printf (&out, ",tls-auth");
+	/* Not adding tls-crypt here, because we won't reach this code if
+	 * tls-auth/tls-crypt does not match.  Removing tls-auth here would
+	 * break stuff, so leaving that in place. */
 
 	if (o->key_method > 1)
 	  buf_printf (&out, ",key-method %d", o->key_method);
@@ -3390,6 +3473,36 @@ options_string_version (const char* s, struct gc_arena *gc)
 
 #endif /* ENABLE_OCC */
 
+char *
+options_string_extract_option (const char *options_string,const char *opt_name,
+    struct gc_arena *gc)
+{
+  char *ret = NULL;
+  const size_t opt_name_len = strlen(opt_name);
+
+  const char *p = options_string;
+  while (p)
+    {
+      if (0 == strncmp(p, opt_name, opt_name_len) &&
+	  strlen(p) > (opt_name_len+1) && p[opt_name_len] == ' ')
+	{
+	  /* option found, extract value */
+	  const char *start = &p[opt_name_len+1];
+	  const char *end = strchr (p, ',');
+	  size_t val_len = end ? end - start : strlen (start);
+	  ret = gc_malloc (val_len+1, true, gc);
+	  memcpy (ret, start, val_len);
+	  break;
+	}
+      p = strchr (p, ',');
+      if (p)
+	{
+	  p++; /* skip delimiter */
+	}
+    }
+  return ret;
+}
+
 static void
 foreign_option (struct options *o, char *argv[], int len, struct env_set *es)
 {
@@ -3560,7 +3673,7 @@ usage_small (void)
   openvpn_exit (OPENVPN_EXIT_STATUS_USAGE); /* exit point */
 }
 
-#ifdef WIN32
+#ifdef _WIN32
 void show_windows_version(const unsigned int flags)
 {
   struct gc_arena gc = gc_new ();
@@ -3594,11 +3707,11 @@ usage_version (void)
 {
   msg (M_INFO|M_NOPREFIX, "%s", title_string);
   show_library_versions( M_INFO|M_NOPREFIX );
-#ifdef WIN32
+#ifdef _WIN32
   show_windows_version( M_INFO|M_NOPREFIX );
 #endif
   msg (M_INFO|M_NOPREFIX, "Originally developed by James Yonan");
-  msg (M_INFO|M_NOPREFIX, "Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>");
+  msg (M_INFO|M_NOPREFIX, "Copyright (C) 2002-2016 OpenVPN Technologies, Inc. <sales@openvpn.net>");
 #ifndef ENABLE_SMALL
 #ifdef CONFIGURE_DEFINES
   msg (M_INFO|M_NOPREFIX, "Compile time defines: %s", CONFIGURE_DEFINES);
@@ -3641,7 +3754,7 @@ positive_atoi (const char *str)
   return i < 0 ? 0 : i;
 }
 
-#ifdef WIN32  /* This function is only used when compiling on Windows */
+#ifdef _WIN32  /* This function is only used when compiling on Windows */
 static unsigned int
 atou (const char *str)
 {
@@ -3881,7 +3994,7 @@ read_inline_file (struct in_src *is, const char *close_tag, struct gc_arena *gc)
   ret = string_alloc (BSTR (&buf), gc);
   buf_clear (&buf);
   free_buf (&buf);
-  CLEAR (line);
+  secure_memzero (line, sizeof (line));
   return ret;
 }
 
@@ -3996,7 +4109,7 @@ read_config_file (struct options *options,
     {
       msg (msglevel, "In %s:%d: Maximum recursive include levels exceeded in include attempt of file %s -- probably you have a configuration file that tries to include itself.", top_file, top_line, file);
     }
-  CLEAR (line);
+  secure_memzero (line, sizeof (line));
   CLEAR (p);
 }
 
@@ -4028,7 +4141,7 @@ read_config_string (const char *prefix,
 	}
       CLEAR (p);
     }
-  CLEAR (line);
+  secure_memzero (line, sizeof (line));
 }
 
 void
@@ -4320,6 +4433,8 @@ add_option (struct options *options,
    */
   if (streq (p[0], "setenv") && p[1] && streq (p[1], "opt") && !(permission_mask & OPT_P_PULL_MODE))
     {
+      if (!p[2])
+        p[2] = "setenv opt"; /* will trigger an error that includes setenv opt */
       p += 2;
       msglevel_fc = M_WARN;
     }
@@ -5618,6 +5733,10 @@ add_option (struct options *options,
 	      goto err;
 	    }
 	}
+#ifdef _WIN32
+      /* we need this here to handle pushed --redirect-gateway */
+      remap_redirect_gateway_flags (options);
+#endif
       options->routes->flags |= RG_ENABLE;
     }
   else if (streq (p[0], "remote-random-hostname") && !p[1])
@@ -6226,7 +6345,7 @@ add_option (struct options *options,
 #endif
   else if (streq (p[0], "msg-channel") && p[1])
     {
-#ifdef WIN32
+#ifdef _WIN32
       VERIFY_PERMISSION (OPT_P_GENERAL);
       HANDLE process = GetCurrentProcess ();
       HANDLE handle = (HANDLE) atoi (p[1]);
@@ -6242,7 +6361,7 @@ add_option (struct options *options,
       goto err;
 #endif
     }
-#ifdef WIN32
+#ifdef _WIN32
   else if (streq (p[0], "win-sys") && p[1] && !p[2])
     {
       VERIFY_PERMISSION (OPT_P_GENERAL);
@@ -6323,7 +6442,7 @@ add_option (struct options *options,
       to->ip_win32_defined = true; 
     }
 #endif
-#if defined(WIN32) || defined(TARGET_ANDROID)
+#if defined(_WIN32) || defined(TARGET_ANDROID)
   else if (streq (p[0], "dhcp-option") && p[1] && !p[3])
     {
       struct tuntap_options *o = &options->tuntap_options;
@@ -6352,6 +6471,20 @@ add_option (struct options *options,
 	{
 	  dhcp_option_address_parse ("DNS", p[2], o->dns, &o->dns_len, msglevel);
 	}
+      else if (streq (p[1], "DNS6") && p[2] && ipv6_addr_safe(p[2]))
+	{
+	  struct in6_addr addr;
+	  foreign_option (options, p, 3, es);
+	  if (o->dns6_len >= N_DHCP_ADDR)
+	    {
+	      msg (msglevel, "--dhcp-option DNS6: maximum of %d dns servers can be specified",
+		   N_DHCP_ADDR);
+	    }
+	  else if (get_ipv6_addr (p[2], &addr, NULL, msglevel))
+	    {
+	      o->dns6[o->dns6_len++] = addr;
+	    }
+	}
       else if (streq (p[1], "WINS") && p[2])
 	{
 	  dhcp_option_address_parse ("WINS", p[2], o->wins, &o->wins_len, msglevel);
@@ -6373,10 +6506,17 @@ add_option (struct options *options,
 	  msg (msglevel, "--dhcp-option: unknown option type '%s' or missing or unknown parameter", p[1]);
 	  goto err;
 	}
-      o->dhcp_options = true;
+
+      /* flag that we have options to give to the TAP driver's DHCPv4 server
+       *  - skipped for "DNS6", as that's not a DHCPv4 option
+       */
+      if (!streq (p[1], "DNS6"))
+	{
+	  o->dhcp_options = true;
+	}
     }
 #endif
-#ifdef WIN32
+#ifdef _WIN32
   else if (streq (p[0], "show-adapters") && !p[1])
     {
       VERIFY_PERMISSION (OPT_P_GENERAL);
@@ -7014,14 +7154,12 @@ add_option (struct options *options,
 #endif
     {
       VERIFY_PERMISSION (OPT_P_GENERAL);
-      if (options->verify_x509_type != VERIFY_X509_NONE &&
-          options->verify_x509_type != TLS_REMOTE_SUBJECT_DN &&
-          options->verify_x509_type != TLS_REMOTE_SUBJECT_RDN_PREFIX)
+      if (options->verify_x509_type != VERIFY_X509_NONE)
         {
           msg (msglevel, "you cannot use --compat-names with --verify-x509-name");
           goto err;
         }
-      msg (M_WARN, "DEPRECATED OPTION: --compat-names, please update your configuration");
+      msg (M_WARN, "DEPRECATED OPTION: --compat-names, please update your configuration. This will be removed in OpenVPN v2.5.");
       compat_flag (COMPAT_FLAG_SET | COMPAT_NAMES);
 #if P2MP_SERVER
       if (p[1] && streq (p[1], "no-remapping"))
@@ -7030,59 +7168,20 @@ add_option (struct options *options,
   else if (streq (p[0], "no-name-remapping") && !p[1])
     {
       VERIFY_PERMISSION (OPT_P_GENERAL);
-      if (options->verify_x509_type != VERIFY_X509_NONE &&
-          options->verify_x509_type != TLS_REMOTE_SUBJECT_DN &&
-          options->verify_x509_type != TLS_REMOTE_SUBJECT_RDN_PREFIX)
+      if (options->verify_x509_type != VERIFY_X509_NONE)
         {
           msg (msglevel, "you cannot use --no-name-remapping with --verify-x509-name");
           goto err;
         }
-      msg (M_WARN, "DEPRECATED OPTION: --no-name-remapping, please update your configuration");
+      msg (M_WARN, "DEPRECATED OPTION: --no-name-remapping, please update your configuration. This will be removed in OpenVPN v2.5.");
       compat_flag (COMPAT_FLAG_SET | COMPAT_NAMES);
       compat_flag (COMPAT_FLAG_SET | COMPAT_NO_NAME_REMAPPING);
 #endif
-    }
-  else if (streq (p[0], "tls-remote") && p[1] && !p[2])
-    {
-      VERIFY_PERMISSION (OPT_P_GENERAL);
-
-      if (options->verify_x509_type != VERIFY_X509_NONE &&
-          options->verify_x509_type != TLS_REMOTE_SUBJECT_DN &&
-          options->verify_x509_type != TLS_REMOTE_SUBJECT_RDN_PREFIX)
-        {
-          msg (msglevel, "you cannot use --tls-remote with --verify-x509-name");
-          goto err;
-        }
-      msg (M_WARN, "DEPRECATED OPTION: --tls-remote, please update your configuration");
-
-      if (strlen (p[1]))
-        {
-          int is_username = (!strchr (p[1], '=') || !strstr (p[1], ", "));
-          int type = TLS_REMOTE_SUBJECT_DN;
-          if (p[1][0] != '/' && is_username)
-            type = TLS_REMOTE_SUBJECT_RDN_PREFIX;
-
-          /*
-           * Enable legacy openvpn format for DNs that have not been converted
-           * yet and --x509-username-field (not containing an '=' or ', ')
-           */
-          if (p[1][0] == '/' || is_username)
-            compat_flag (COMPAT_FLAG_SET | COMPAT_NAMES);
-
-          options->verify_x509_type = type;
-          options->verify_x509_name = p[1];
-        }
     }
   else if (streq (p[0], "verify-x509-name") && p[1] && strlen (p[1]) && !p[3])
     {
       int type = VERIFY_X509_SUBJECT_DN;
       VERIFY_PERMISSION (OPT_P_GENERAL);
-      if (options->verify_x509_type == TLS_REMOTE_SUBJECT_DN ||
-          options->verify_x509_type == TLS_REMOTE_SUBJECT_RDN_PREFIX)
-        {
-          msg (msglevel, "you cannot use --verify-x509-name with --tls-remote");
-          goto err;
-        }
       if (compat_flag (COMPAT_FLAG_QUERY | COMPAT_NAMES))
         {
           msg (msglevel, "you cannot use --verify-x509-name with "
@@ -7205,6 +7304,15 @@ add_option (struct options *options,
 	    goto err;
 	}
       options->tls_auth_file = p[1];
+    }
+  else if (streq (p[0], "tls-crypt") && p[1] && !p[3])
+    {
+      VERIFY_PERMISSION (OPT_P_GENERAL);
+      if (streq (p[1], INLINE_FILE_TAG) && p[2])
+	{
+	  options->tls_crypt_inline = p[2];
+	}
+      options->tls_crypt_file = p[1];
     }
   else if (streq (p[0], "key-method") && p[1] && !p[2])
     {
@@ -7384,6 +7492,11 @@ add_option (struct options *options,
       options->keying_material_exporter_length = ekm_length;
     }
 #endif
+  else if (streq (p[0], "allow-recursive-routing") && !p[1])
+    {
+      VERIFY_PERMISSION (OPT_P_GENERAL);
+      options->allow_recursive_routing = true;
+    }
   else
     {
       int i;

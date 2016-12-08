@@ -6,7 +6,7 @@
  *             packet compression.
  *
  *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
- *  Copyright (C) 2010 Fox Crypto B.V. <openvpn@fox-it.com>
+ *  Copyright (C) 2010-2016 Fox Crypto B.V. <openvpn@fox-it.com>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -36,7 +36,7 @@
 #include "crypto.h"
 #include "error.h"
 #include "integer.h"
-#include "misc.h"
+#include "platform.h"
 
 #include "memdbg.h"
 
@@ -63,9 +63,6 @@
  * happen unless the frame parameters are wrong.
  */
 
-#define CRYPT_ERROR(format) \
-  do { msg (D_CRYPT_ERRORS, "%s: " format, error_prefix); goto error_exit; } while (false)
-
 static void
 openvpn_encrypt_aead (struct buffer *buf, struct buffer work,
 	 struct crypto_options *opt) {
@@ -89,12 +86,11 @@ openvpn_encrypt_aead (struct buffer *buf, struct buffer work,
   {
     struct buffer iv_buffer;
     struct packet_id_net pin;
-    uint8_t iv[OPENVPN_MAX_IV_LENGTH];
+    uint8_t iv[OPENVPN_MAX_IV_LENGTH] = {0};
     const int iv_len = cipher_ctx_iv_length (ctx->cipher);
 
     ASSERT (iv_len >= OPENVPN_AEAD_MIN_IV_LEN && iv_len <= OPENVPN_MAX_IV_LENGTH);
 
-    memset(iv, 0, sizeof(iv));
     buf_set_write (&iv_buffer, iv, iv_len);
 
     /* IV starts with packet id to make the IV unique for packet */
@@ -178,7 +174,7 @@ openvpn_encrypt_v1 (struct buffer *buf, struct buffer work,
       /* Do Encrypt from buf -> work */
       if (ctx->cipher)
 	{
-	  uint8_t iv_buf[OPENVPN_MAX_IV_LENGTH];
+	  uint8_t iv_buf[OPENVPN_MAX_IV_LENGTH] = {0};
 	  const int iv_size = cipher_ctx_iv_length (ctx->cipher);
 	  const cipher_kt_t *cipher_kt = cipher_ctx_get_cipher_kt (ctx->cipher);
 	  int outlen;
@@ -193,8 +189,6 @@ openvpn_encrypt_v1 (struct buffer *buf, struct buffer work,
 
 	  if (cipher_kt_mode_cbc(cipher_kt))
 	    {
-	      CLEAR (iv_buf);
-
 	      /* generate pseudo-random IV */
 	      if (opt->flags & CO_USE_IV)
 		prng_bytes (iv_buf, iv_size);
@@ -217,7 +211,6 @@ openvpn_encrypt_v1 (struct buffer *buf, struct buffer work,
 	      ASSERT (packet_id_initialized(&opt->packet_id));
 
 	      packet_id_alloc_outgoing (&opt->packet_id.send, &pin, true);
-	      memset (iv_buf, 0, iv_size);
 	      buf_set_write (&b, iv_buf, iv_size);
 	      ASSERT (packet_id_write (&pin, &b, true, false));
 	    }
@@ -326,17 +319,7 @@ openvpn_encrypt (struct buffer *buf, struct buffer work,
     }
 }
 
-/**
- * Check packet ID for replay, and perform replay administration.
- *
- * @param opt	Crypto options for this packet, contains replay state.
- * @param pin	Packet ID read from packet.
- * @param error_prefix	Prefix to use when printing error messages.
- * @param gc	Garbage collector to use.
- *
- * @return true if packet ID is validated to be not a replay, false otherwise.
- */
-static bool crypto_check_replay(struct crypto_options *opt,
+bool crypto_check_replay(struct crypto_options *opt,
     const struct packet_id_net *pin, const char *error_prefix,
     struct gc_arena *gc) {
   bool ret = false;
@@ -563,14 +546,13 @@ openvpn_decrypt_v1 (struct buffer *buf, struct buffer work,
 	{
 	  const int iv_size = cipher_ctx_iv_length (ctx->cipher);
 	  const cipher_kt_t *cipher_kt = cipher_ctx_get_cipher_kt (ctx->cipher);
-	  uint8_t iv_buf[OPENVPN_MAX_IV_LENGTH];
+	  uint8_t iv_buf[OPENVPN_MAX_IV_LENGTH] = { 0 };
 	  int outlen;
 
 	  /* initialize work buffer with FRAME_HEADROOM bytes of prepend capacity */
 	  ASSERT (buf_init (&work, FRAME_HEADROOM_ADJ (frame, FRAME_HEADROOM_MARKER_DECRYPT)));
 
 	  /* use IV if user requested it */
-	  CLEAR (iv_buf);
 	  if (opt->flags & CO_USE_IV)
 	    {
 	      if (buf->len < iv_size)
@@ -1028,6 +1010,7 @@ test_crypto (struct crypto_options *co, struct frame* frame)
   struct buffer encrypt_workspace = alloc_buf_gc (BUF_SIZE (frame), &gc);
   struct buffer decrypt_workspace = alloc_buf_gc (BUF_SIZE (frame), &gc);
   struct buffer buf = clear_buf();
+  void *buf_p;
 
   /* init work */
   ASSERT (buf_init (&work, FRAME_HEADROOM (frame)));
@@ -1073,7 +1056,9 @@ test_crypto (struct crypto_options *co, struct frame* frame)
 
       /* copy source to input buf */
       buf = work;
-      memcpy (buf_write_alloc (&buf, BLEN (&src)), BPTR (&src), BLEN (&src));
+      buf_p = buf_write_alloc (&buf, BLEN (&src));
+      ASSERT(buf_p);
+      memcpy (buf_p, BPTR (&src), BLEN (&src));
 
       /* initialize work buffer with FRAME_HEADROOM bytes of prepend capacity */
       ASSERT (buf_init (&encrypt_workspace, FRAME_HEADROOM (frame)));
@@ -1100,48 +1085,45 @@ test_crypto (struct crypto_options *co, struct frame* frame)
 }
 
 void
-get_tls_handshake_key (const struct key_type *key_type,
-		       struct key_ctx_bi *ctx,
-		       const char *key_file,
-		       const int key_direction,
-		       const unsigned int flags)
+crypto_read_openvpn_key (const struct key_type *key_type,
+	struct key_ctx_bi *ctx, const char *key_file, const char *key_inline,
+	const int key_direction, const char *key_name, const char *opt_name)
 {
-  if (key_file)
+  struct key2 key2;
+  struct key_direction_state kds;
+  char log_prefix[128] = { 0 };
+
+  if (key_inline)
     {
-      struct key2 key2;
-      struct key_direction_state kds;
-
-      if (flags & GHK_INLINE)
-	{
-	  read_key_file (&key2, key_file, RKF_INLINE|RKF_MUST_SUCCEED);
-	}
-      else
-	{
-	  read_key_file (&key2, key_file, RKF_MUST_SUCCEED);
-	}
-
-	if (key2.n != 2)
-	  {
-	    msg (M_ERR, "Control Channel Authentication: File '%s' does not "
-		"have OpenVPN Static Key format.  Using free-form passphrase "
-		"file is not supported anymore.", key_file);
-	  }
-      /* handle key direction */
-      key_direction_state_init (&kds, key_direction);
-      must_have_n_keys (key_file, "tls-auth", &key2, kds.need_keys);
-
-      /* initialize key in both directions */
-      init_key_ctx (&ctx->encrypt, &key2.keys[kds.out_key], key_type, OPENVPN_OP_ENCRYPT,
-		    "Outgoing Control Channel Authentication");
-      init_key_ctx (&ctx->decrypt, &key2.keys[kds.in_key], key_type, OPENVPN_OP_DECRYPT,
-		    "Incoming Control Channel Authentication");
-
-      CLEAR (key2);
+      read_key_file (&key2, key_inline, RKF_MUST_SUCCEED|RKF_INLINE);
     }
   else
     {
-      CLEAR (*ctx);
+      read_key_file (&key2, key_file, RKF_MUST_SUCCEED);
     }
+
+  if (key2.n != 2)
+    {
+      msg (M_ERR, "File '%s' does not have OpenVPN Static Key format.  Using "
+	   "free-form passphrase file is not supported anymore.", key_file);
+    }
+
+  /* check for and fix highly unlikely key problems */
+  verify_fix_key2 (&key2, key_type, key_file);
+
+  /* handle key direction */
+  key_direction_state_init (&kds, key_direction);
+  must_have_n_keys (key_file, opt_name, &key2, kds.need_keys);
+
+  /* initialize key in both directions */
+  openvpn_snprintf (log_prefix, sizeof (log_prefix), "Outgoing %s", key_name);
+  init_key_ctx (&ctx->encrypt, &key2.keys[kds.out_key], key_type,
+		OPENVPN_OP_ENCRYPT, log_prefix);
+  openvpn_snprintf (log_prefix, sizeof (log_prefix), "Incoming %s", key_name);
+  init_key_ctx (&ctx->decrypt, &key2.keys[kds.in_key], key_type,
+		OPENVPN_OP_DECRYPT, log_prefix);
+
+  secure_memzero (&key2, sizeof (key2));
 }
 
 /* header and footer for static key file */
@@ -1320,9 +1302,6 @@ read_key_file (struct key2 *key2, const char *file, const unsigned int flags)
   if (!(flags & RKF_INLINE))
     buf_clear (&in);
 
-  if (key2->n)
-    warn_if_group_others_accessible (error_filename);
-
 #if 0
   /* DEBUGGING */
   {
@@ -1396,8 +1375,8 @@ write_key_file (const int nkeys, const char *filename)
       buf_printf (&out, "%s\n", fmt);
 
       /* zero memory which held key component (will be freed by GC) */
-      memset (fmt, 0, strlen(fmt));
-      CLEAR (key);
+      secure_memzero (fmt, strlen (fmt));
+      secure_memzero (&key, sizeof (key));
     }
 
   buf_printf (&out, "%s\n", static_key_foot);

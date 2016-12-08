@@ -301,7 +301,7 @@ check_add_routes_dowork (struct context *c)
 	    {
 	      register_signal (c, SIGHUP, "ip-fail");
 	      c->persist.restart_sleep_seconds = 10;
-#ifdef WIN32
+#ifdef _WIN32
 	      show_routes (M_INFO|M_NOPREFIX);
 	      show_adapters (M_INFO|M_NOPREFIX);
 #endif
@@ -993,6 +993,76 @@ read_incoming_tun (struct context *c)
   perf_pop ();
 }
 
+/**
+ * Drops UDP packets which OS decided to route via tun.
+ *
+ * On Windows and OS X when netwotk adapter is disabled or
+ * disconnected, platform starts to use tun as external interface.
+ * When packet is sent to tun, it comes to openvpn, encapsulated
+ * and sent to routing table, which sends it again to tun.
+ */
+static void
+drop_if_recursive_routing (struct context *c, struct buffer *buf)
+{
+  bool drop = false;
+  struct openvpn_sockaddr tun_sa;
+  int ip_hdr_offset = 0;
+
+  if (c->c2.to_link_addr == NULL) /* no remote addr known */
+    return;
+
+  tun_sa = c->c2.to_link_addr->dest;
+
+  int proto_ver = get_tun_ip_ver (TUNNEL_TYPE (c->c1.tuntap), &c->c2.buf, &ip_hdr_offset);
+
+  if (proto_ver == 4)
+    {
+      const struct openvpn_iphdr *pip;
+
+      /* make sure we got whole IP header */
+      if (BLEN (buf) < ((int) sizeof (struct openvpn_iphdr) + ip_hdr_offset))
+	return;
+
+      /* skip ipv4 packets for ipv6 tun */
+      if (tun_sa.addr.sa.sa_family != AF_INET)
+	return;
+
+      pip = (struct openvpn_iphdr *) (BPTR (buf) + ip_hdr_offset);
+
+      /* drop packets with same dest addr as gateway */
+      if (tun_sa.addr.in4.sin_addr.s_addr == pip->daddr)
+	drop = true;
+    }
+  else if (proto_ver == 6)
+    {
+      const struct openvpn_ipv6hdr *pip6;
+
+      /* make sure we got whole IPv6 header */
+      if (BLEN (buf) < ((int) sizeof (struct openvpn_ipv6hdr) + ip_hdr_offset))
+	return;
+
+      /* skip ipv6 packets for ipv4 tun */
+      if (tun_sa.addr.sa.sa_family != AF_INET6)
+	return;
+
+      /* drop packets with same dest addr as gateway */
+      pip6 = (struct openvpn_ipv6hdr *) (BPTR (buf) + ip_hdr_offset);
+      if (IN6_ARE_ADDR_EQUAL(&tun_sa.addr.in6.sin6_addr, &pip6->daddr))
+	drop = true;
+    }
+
+  if (drop)
+    {
+      struct gc_arena gc = gc_new ();
+
+      c->c2.buf.len = 0;
+
+      msg(D_LOW, "Recursive routing detected, drop tun packet to %s",
+		print_link_socket_actual(c->c2.to_link_addr, &gc));
+      gc_free (&gc);
+    }
+}
+
 /*
  * Input:  c->c2.buf
  * Output: c->c2.to_link
@@ -1018,6 +1088,8 @@ process_incoming_tun (struct context *c)
 
   if (c->c2.buf.len > 0)
     {
+      if ((c->options.mode == MODE_POINT_TO_POINT) && (!c->options.allow_recursive_routing))
+	drop_if_recursive_routing (c, &c->c2.buf);
       /*
        * The --passtos and --mssfix options require
        * us to examine the IP header (IPv4 or IPv6).
@@ -1348,7 +1420,7 @@ pre_select (struct context *c)
   c->c2.timeval.tv_sec = BIG_TIMEOUT;
   c->c2.timeval.tv_usec = 0;
 
-#if defined(WIN32)
+#if defined(_WIN32)
   if (check_debug_level (D_TAP_WIN_DEBUG))
     {
       c->c2.timeval.tv_sec = 1;
@@ -1506,7 +1578,8 @@ io_wait_dowork (struct context *c, const unsigned int flags)
 
 #ifdef ENABLE_ASYNC_PUSH
   /* arm inotify watcher */
-  event_ctl (c->c2.event_set, c->c2.inotify_fd, EVENT_READ, (void*)&file_shift);
+  if (c->options.mode == MODE_SERVER)
+    event_ctl (c->c2.event_set, c->c2.inotify_fd, EVENT_READ, (void*)&file_shift);
 #endif
 
   /*

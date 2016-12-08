@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2016 Fox Crypto B.V. <openvpn@fox-it.com>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -22,17 +22,14 @@
  *  59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
-#ifndef BASIC_H
-#define BASIC_H
+#ifndef MOCK_MSG_H
+#define MOCK_MSG_H
 
-#define BOOL_CAST(x) ((x) ? (true) : (false))
+/**
+ * Mock debug level defaults to 0, which gives clean(-ish) test reports.  Call
+ * this function from your test driver to increase debug output when you
+ * need debug output.
+ */
+void mock_set_debug_level(int level);
 
-/* size of an array */
-#define SIZE(x) (sizeof(x)/sizeof(x[0]))
-
-/* clear an object (may be optimized away, use secure_memzero() to erase secrets) */
-#define CLEAR(x) memset(&(x), 0, sizeof(x))
-
-#define IPV4_NETMASK_HOST 0xffffffffU
-
-#endif
+#endif /* MOCK_MSG */

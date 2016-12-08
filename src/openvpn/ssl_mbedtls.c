@@ -120,6 +120,12 @@ tls_ctx_free(struct tls_root_ctx *ctx)
       if (ctx->dhm_ctx)
 	free(ctx->dhm_ctx);
 
+      mbedtls_x509_crl_free(ctx->crl);
+      if (ctx->crl)
+	{
+	  free(ctx->crl);
+	}
+
 #if defined(ENABLE_PKCS11)
       if (ctx->priv_key_pkcs11 != NULL) {
 	  mbedtls_pkcs11_priv_key_free(ctx->priv_key_pkcs11);
@@ -283,7 +289,7 @@ tls_ctx_load_cryptoapi(struct tls_root_ctx *ctx, const char *cryptoapi_cert)
 {
   msg(M_FATAL, "Windows CryptoAPI not yet supported for mbed TLS.");
 }
-#endif /* WIN32 */
+#endif /* _WIN32 */
 
 void
 tls_ctx_load_cert_file (struct tls_root_ctx *ctx, const char *cert_file,
@@ -360,8 +366,6 @@ tls_ctx_load_priv_file (struct tls_root_ctx *ctx, const char *priv_key_file,
       msg (M_WARN, "Cannot load private key file %s", priv_key_file);
       return 1;
     }
-
-  warn_if_group_others_accessible (priv_key_file);
 
   if (!mbed_ok(mbedtls_pk_check_pair(&ctx->crt_chain->pk, ctx->priv_key)))
     {
@@ -723,9 +727,9 @@ void tls_ctx_personalise_random(struct tls_root_ctx *ctx)
 int
 tls_version_max(void)
 {
-#if defined(SSL_MAJOR_VERSION_3) && defined(SSL_MINOR_VERSION_3)
+#if defined(MBEDTLS_SSL_MAJOR_VERSION_3) && defined(MBEDTLS_SSL_MINOR_VERSION_3)
   return TLS_VER_1_2;
-#elif defined(SSL_MAJOR_VERSION_3) && defined(SSL_MINOR_VERSION_2)
+#elif defined(MBEDTLS_SSL_MAJOR_VERSION_3) && defined(MBEDTLS_SSL_MINOR_VERSION_2)
   return TLS_VER_1_1;
 #else
   return TLS_VER_1_0;
@@ -764,6 +768,41 @@ static void tls_version_to_major_minor(int tls_ver, int *major, int *minor) {
       msg(M_FATAL, "%s: invalid TLS version %d", __func__, tls_ver);
       break;
   }
+}
+
+void
+backend_tls_ctx_reload_crl(struct tls_root_ctx *ctx, const char *crl_file,
+    const char *crl_inline)
+{
+  ASSERT (crl_file);
+
+  if (ctx->crl == NULL)
+    {
+      ALLOC_OBJ_CLEAR(ctx->crl, mbedtls_x509_crl);
+    }
+  mbedtls_x509_crl_free(ctx->crl);
+
+  if (!strcmp (crl_file, INLINE_FILE_TAG) && crl_inline)
+    {
+      if (!mbed_ok(mbedtls_x509_crl_parse(ctx->crl,
+	(const unsigned char *)crl_inline, strlen(crl_inline)+1)))
+	{
+	  msg (M_WARN, "CRL: cannot parse inline CRL");
+	  goto err;
+	}
+    }
+  else
+    {
+      if (!mbed_ok(mbedtls_x509_crl_parse_file(ctx->crl, crl_file)))
+	{
+	  msg (M_WARN, "CRL: cannot read CRL from file %s", crl_file);
+	  goto err;
+	}
+    }
+  return;
+
+err:
+  mbedtls_x509_crl_free(ctx->crl);
 }
 
 void key_state_ssl_init(struct key_state_ssl *ks_ssl,
@@ -818,7 +857,7 @@ void key_state_ssl_init(struct key_state_ssl *ks_ssl,
   mbedtls_ssl_conf_verify (&ks_ssl->ssl_config, verify_callback, session);
 
   /* TODO: mbed TLS does not currently support sending the CA chain to the client */
-  mbedtls_ssl_conf_ca_chain (&ks_ssl->ssl_config, ssl_ctx->ca_chain, NULL );
+  mbedtls_ssl_conf_ca_chain (&ks_ssl->ssl_config, ssl_ctx->ca_chain, ssl_ctx->crl);
 
   /* Initialize minimum TLS version */
   {

@@ -267,7 +267,7 @@ AC_ARG_ENABLE(
 AC_ARG_ENABLE(
 	[async-push],
 	[AS_HELP_STRING([--enable-async-push], [enable async-push support @<:@default=no@:>@])],
-	[enable_async_push="yes"],
+	,
 	[enable_async_push="no"]
 )
 
@@ -390,6 +390,12 @@ AC_DEFINE_UNQUOTED([IPROUTE_PATH], ["$IPROUTE"], [Path to iproute tool])
 AC_DEFINE_UNQUOTED([ROUTE_PATH], ["$ROUTE"], [Path to route tool])
 AC_DEFINE_UNQUOTED([SYSTEMD_ASK_PASSWORD_PATH], ["$SYSTEMD_ASK_PASSWORD"], [Path to systemd-ask-password tool])
 
+# Set -std=c99 unless user already specified a -std=
+case "${CFLAGS}" in
+  *-std=*) ;;
+  *)       CFLAGS="${CFLAGS} -std=c99" ;;
+esac
+
 #
 # Libtool
 #
@@ -429,7 +435,7 @@ AX_EMPTY_ARRAY
 AC_CHECK_SIZEOF([unsigned int])
 AC_CHECK_SIZEOF([unsigned long])
 AC_CHECK_HEADERS([ \
-	stdio.h stdarg.h stdbool.h limits.h \
+	stdio.h stdarg.h limits.h \
 	time.h errno.h fcntl.h io.h direct.h \
 	ctype.h sys/types.h sys/socket.h \
 	signal.h unistd.h dlfcn.h \
@@ -493,6 +499,12 @@ AC_CHECK_TYPES(
 	[AC_DEFINE([in_addr_t], [uint32_t], [Workaround missing in_addr_t])],
 	[[${SOCKET_INCLUDES}]]
 )
+AC_CHECK_TYPES(
+	[in_port_t],
+	,
+	[AC_DEFINE([in_port_t], [uint16_t], [Workaround missing in_port_t])],
+	[[${SOCKET_INCLUDES}]]
+)
 AC_CHECK_TYPE(
 	[struct iphdr],
 	[AC_DEFINE([HAVE_IPHDR], [1], [struct iphdr needed for IPv6 support])],
@@ -546,6 +558,28 @@ AC_CHECK_DECLS(
 	,
 	,
 	[[${SOCKET_INCLUDES}]]
+)
+AC_CHECKING([anonymous union support])
+AC_COMPILE_IFELSE(
+	[AC_LANG_PROGRAM(
+		[[
+			struct mystruct {
+			  union {
+			    int m1;
+			    char m2;
+			  };
+			};
+		]],
+		[[
+			struct mystruct s;
+			s.m1 = 1; s.m2 = 2;
+		]]
+	)],
+	[
+		AC_MSG_RESULT([yes])
+		AC_DEFINE([HAVE_ANONYMOUS_UNION_SUPPORT], [], [Compiler supports anonymous unions])
+	],
+	[AC_MSG_RESULT([no])]
 )
 
 dnl We emulate signals in Windows
@@ -1142,12 +1176,6 @@ if test "${enable_pkcs11}" = "yes"; then
 	)
 fi
 
-# Set -std=c99 unless user already specified a -std=
-case "${CFLAGS}" in
-  *-std=*) ;;
-  *)       CFLAGS="${CFLAGS} -std=c99" ;;
-esac
-
 if test "${enable_pedantic}" = "yes"; then
 	enable_strict="yes"
 	CFLAGS="${CFLAGS} -pedantic"
@@ -1270,9 +1298,10 @@ AC_CONFIG_FILES([
 	src/plugins/down-root/Makefile
 	tests/Makefile
         tests/unit_tests/Makefile
+        tests/unit_tests/example_test/Makefile
+        tests/unit_tests/openvpn/Makefile
         tests/unit_tests/plugins/Makefile
         tests/unit_tests/plugins/auth-pam/Makefile
-        tests/unit_tests/example_test/Makefile
         vendor/Makefile
 	sample/Makefile
 	doc/Makefile

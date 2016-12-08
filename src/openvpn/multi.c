@@ -126,10 +126,8 @@ learn_address_script (const struct multi_context *m,
     {
       struct argv argv = argv_new ();
       setenv_str (es, "script_type", "learn-address");
-      argv_printf (&argv, "%sc %s %s",
-		   m->top.options.learn_address_script,
-		   op,
-		   mroute_addr_print (addr, &gc));
+      argv_parse_cmd (&argv, m->top.options.learn_address_script);
+      argv_printf_cat (&argv, "%s %s", op, mroute_addr_print (addr, &gc));
       if (mi)
 	argv_printf_cat (&argv, "%s", tls_common_name (mi->context.c2.tls_multi, false));
       if (!openvpn_run_script (&argv, es, 0, "--learn-address"))
@@ -545,7 +543,7 @@ multi_client_disconnect_script (struct multi_context *m,
 	{
 	  struct argv argv = argv_new ();
 	  setenv_str (mi->context.c2.es, "script_type", "client-disconnect");
-	  argv_printf (&argv, "%sc", mi->context.options.client_disconnect_script);
+	  argv_parse_cmd (&argv, mi->context.options.client_disconnect_script);
 	  openvpn_run_script (&argv, mi->context.c2.es, 0, "--client-disconnect");
 	  argv_reset (&argv);
 	}
@@ -1201,7 +1199,7 @@ multi_learn_in6_addr  (struct multi_context *m,
   addr.len = 16;
   addr.type = MR_ADDR_IPV6;
   addr.netbits = 0;
-  memcpy( &addr.addr, &a6, sizeof(a6) );
+  addr.v6.addr = a6;
 
   if (netbits >= 0)
     {
@@ -1834,9 +1832,8 @@ multi_connection_established (struct multi_context *m, struct multi_instance *mi
             goto script_failed;
           }
 
-	  argv_printf (&argv, "%sc %s",
-		       mi->context.options.client_connect_script,
-		       dc_file);
+          argv_parse_cmd (&argv, mi->context.options.client_connect_script);
+          argv_printf_cat (&argv, "%s", dc_file);
 
 	  if (openvpn_run_script (&argv, mi->context.c2.es, 0, "--client-connect"))
 	    {
@@ -2320,8 +2317,9 @@ void multi_process_float (struct multi_context* m, struct multi_instance* mi)
 	mroute_addr_print (&mi->real, &gc),
 	print_link_socket_actual (&m->top.c2.from, &gc));
 
-    ASSERT (hash_remove(m->hash, &mi->real));
-    ASSERT (hash_remove(m->iter, &mi->real));
+    /* remove old address from hash table before changing address */
+    ASSERT (hash_remove (m->hash, &mi->real));
+    ASSERT (hash_remove (m->iter, &mi->real));
 
     /* change external network address of the remote peer */
     mi->real = real;
@@ -2340,8 +2338,7 @@ void multi_process_float (struct multi_context* m, struct multi_instance* mi)
     ASSERT (hash_add (m->iter, &mi->real, mi, false));
 
 #ifdef MANAGEMENT_DEF_AUTH
-    hash_remove (m->cid_hash, &mi->context.c2.mda_context.cid);
-    hash_add (m->cid_hash, &mi->context.c2.mda_context.cid, mi, false);
+    ASSERT (hash_add (m->cid_hash, &mi->context.c2.mda_context.cid, mi, true));
 #endif
 
 done:
@@ -2435,7 +2432,7 @@ multi_process_incoming_link (struct multi_context *m, struct multi_instance *ins
 		{
 		  /* IPv6 link-local address (fe80::xxx)? */
 		  if ( (src.type & MR_ADDR_MASK) == MR_ADDR_IPV6 &&
-		        src.addr[0] == 0xfe && src.addr[1] == 0x80 )
+		        IN6_IS_ADDR_LINKLOCAL (&src.v6.addr) )
 		    {
 		      /* do nothing, for now.  TODO: add address learning */
 		    }

@@ -27,6 +27,11 @@
 
 #include "basic.h"
 
+#include <errno.h>
+#include <stdbool.h>
+
+#include <assert.h>
+
 /* #define ABORT_ON_ERROR */
 
 #ifdef ENABLE_PKCS11
@@ -66,7 +71,7 @@ struct gc_arena;
 
 /* String and Error functions */
 
-#ifdef WIN32
+#ifdef _WIN32
 # define openvpn_errno()             GetLastError()
 # define openvpn_strerror(e, gc)     strerror_win32(e, gc)
   const char *strerror_win32 (DWORD errnum, struct gc_arena *gc);
@@ -219,6 +224,14 @@ FILE *msg_fp(const unsigned int flags);
 void assert_failed (const char *filename, int line, const char *condition)
   __attribute__((__noreturn__));
 
+/* Poor-man's static_assert() for when not supplied by assert.h, taken from
+ * Linux's sys/cdefs.h under GPLv2 */
+#ifndef static_assert
+#define static_assert(expr, diagnostic) \
+    extern int (*__OpenVPN_static_assert_function (void)) \
+      [!!sizeof (struct { int __error_if_negative: (expr) ? 2 : -1; })]
+#endif
+
 #ifdef ENABLE_DEBUG
 void crash (void); /* force a segfault (debugging only) */
 #endif
@@ -248,7 +261,7 @@ void close_syslog ();
 /* log file output */
 void redirect_stdout_stderr (const char *file, bool append);
 
-#ifdef WIN32
+#ifdef _WIN32
 /* get original stderr handle, even if redirected by --log/--log-append */
 HANDLE get_orig_stderr (void);
 #endif
@@ -343,7 +356,7 @@ static inline bool
 ignore_sys_error (const int err)
 {
   /* I/O operation pending */
-#ifdef WIN32
+#ifdef _WIN32
   if (err == WSAEWOULDBLOCK || err == WSAEINVAL)
     return true;
 #else
